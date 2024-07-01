@@ -6,7 +6,6 @@ import type {
 } from '@fastgpt/global/core/dataset/api.d';
 import { TrainingModeEnum } from '@fastgpt/global/core/dataset/constants';
 import { simpleText } from '@fastgpt/global/common/string/tools';
-import { countPromptTokens } from '@fastgpt/global/common/string/tiktoken';
 import { ClientSession } from '../../../common/mongo';
 import { getLLMModel, getVectorModel } from '../../ai/model';
 import { addLog } from '../../../common/system/log';
@@ -169,13 +168,14 @@ export async function pushDataListToTrainingQueue({
         indexes: item.indexes
       })),
       {
-        session
+        session,
+        ordered: false
       }
     );
   } catch (error: any) {
     addLog.error(`Insert error`, error);
     // 如果有错误，将失败的文档添加到失败列表中
-    error.writeErrors.forEach((writeError: any) => {
+    error.writeErrors?.forEach((writeError: any) => {
       failedDocuments.push(data[writeError.index]);
     });
     console.log('failed', failedDocuments);

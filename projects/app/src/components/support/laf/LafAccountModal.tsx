@@ -13,11 +13,13 @@ import { useUserStore } from '@/web/support/user/useUserStore';
 import type { LafAccountType } from '@fastgpt/global/support/user/team/type.d';
 import { postLafPat2Token, getLafApplications } from '@/web/support/laf/api';
 import { getErrText } from '@fastgpt/global/common/error/utils';
+import { getDocPath } from '@/web/common/system/doc';
 
 const LafAccountModal = ({
   defaultData = {
     token: '',
-    appid: ''
+    appid: '',
+    pat: ''
   },
   onClose
 }: {
@@ -65,7 +67,7 @@ const LafAccountModal = ({
       enabled: !!lafToken,
       onSuccess: (data) => {
         if (!getValues('appid') && data.length > 0) {
-          setValue('appid', data[0].appid);
+          setValue('appid', data.filter((app) => app.state === 'Running')[0]?.appid);
         }
       },
       onError: (err) => {
@@ -82,7 +84,6 @@ const LafAccountModal = ({
     mutationFn: async (data: LafAccountType) => {
       if (!userInfo?.team.teamId) return;
       return putUpdateTeam({
-        teamId: userInfo?.team.teamId,
         lafAccount: data
       });
     },
@@ -95,18 +96,20 @@ const LafAccountModal = ({
   });
 
   return (
-    <MyModal isOpen iconSrc="/imgs/module/laf.png" title={t('user.Laf Account Setting')}>
+    <MyModal isOpen iconSrc="/imgs/workflow/laf.png" title={t('user.Laf Account Setting')}>
       <ModalBody>
         <Box fontSize={'sm'} color={'myGray.500'}>
           <Box>{t('support.user.Laf account intro')}</Box>
           <Box textDecoration={'underline'}>
-            <Link href={`https://doc.laf.run/zh/`} isExternal>
+            <Link href={getDocPath('/docs/workflow/modules/laf/')} isExternal>
               {t('support.user.Laf account course')}
             </Link>
           </Box>
           <Box>
             <Link textDecoration={'underline'} href={`${feConfigs.lafEnv}/`} isExternal>
-              {t('support.user.Go laf env')}
+              {t('support.user.Go laf env', {
+                env: feConfigs.lafEnv?.split('//')[1]
+              })}
             </Link>
           </Box>
         </Box>
@@ -138,8 +141,7 @@ const LafAccountModal = ({
               onClick={() => {
                 onResetForm();
                 putUpdateTeam({
-                  teamId: userInfo?.team.teamId || '',
-                  lafAccount: { token: '', appid: '' }
+                  lafAccount: { token: '', appid: '', pat: '' }
                 });
               }}
             >
@@ -171,12 +173,20 @@ const LafAccountModal = ({
         )}
       </ModalBody>
       <ModalFooter>
-        <Button mr={3} variant={'whiteBase'} onClick={onClose}>
+        <Button
+          variant={'whiteBase'}
+          onClick={() => {
+            initUserInfo();
+            onClose();
+          }}
+        >
           {t('common.Close')}
         </Button>
-        <Button isLoading={isUpdating} onClick={handleSubmit((data) => onSubmit(data))}>
-          {t('common.Update')}
-        </Button>
+        {appid && (
+          <Button ml={3} isLoading={isUpdating} onClick={handleSubmit((data) => onSubmit(data))}>
+            {t('common.Update')}
+          </Button>
+        )}
       </ModalFooter>
     </MyModal>
   );

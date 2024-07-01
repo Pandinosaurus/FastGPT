@@ -33,7 +33,7 @@ function embedChatbot() {
   ChatBtnDiv.draggable = false;
 
   const iframe = document.createElement('iframe');
-  iframe.allow = 'fullscreen;microphone';
+  iframe.allow = '*';
   iframe.referrerPolicy = 'no-referrer';
   iframe.title = 'FastGPT Chat Window';
   iframe.id = chatWindowId;
@@ -76,7 +76,8 @@ function embedChatbot() {
 
     chatBtnDown = true;
   });
-  ChatBtn.addEventListener('mousemove', (e) => {
+
+  window.addEventListener('mousemove', (e) => {
     e.stopPropagation();
     if (!canDrag || !chatBtnDown) return;
 
@@ -86,12 +87,8 @@ function embedChatbot() {
 
     ChatBtn.style.transform = `translate3d(${transformX}px, ${transformY}px, 0)`;
   });
-  ChatBtn.addEventListener('mouseup', (e) => {
-    chatBtnDragged = false;
-    chatBtnDown = false;
-  });
+
   window.addEventListener('mouseup', (e) => {
-    chatBtnDragged = false;
     chatBtnDown = false;
   });
 

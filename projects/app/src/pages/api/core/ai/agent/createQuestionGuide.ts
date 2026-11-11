@@ -1,41 +1,97 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
-import type { CreateQuestionGuideParams } from '@/global/core/ai/api.d';
+import { getTeamModelHandle } from '@fastgpt/service/core/ai/model/catalog/service';
+import type { NextApiResponse } from 'next';
+
+import { NextAPI } from '@/service/middleware/entry';
+import { authOutLink } from '@fastgpt/service/support/permission/publish/authChat';
 import { pushQuestionGuideUsage } from '@/service/support/wallet/usage/push';
+import { type ChatCompletionMessageParam } from '@fastgpt/global/core/ai/llm/type';
+import {
+  CreateQuestionGuideBodySchema,
+  CreateQuestionGuideResponseSchema,
+  type CreateQuestionGuideResponseType
+} from '@fastgpt/global/openapi/core/ai/agent/api';
+import { type OutLinkChatAuthProps } from '@fastgpt/global/support/permission/chat';
+import { AuthUserTypeEnum } from '@fastgpt/global/support/permission/constant';
+import { type ApiRequestProps } from '@fastgpt/next/type';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
 import { createQuestionGuide } from '@fastgpt/service/core/ai/functions/createQuestionGuide';
-import { authChatCert } from '@/service/support/permission/auth/chat';
+import { authCert } from '@fastgpt/service/support/permission/auth/common';
+import { getAuthorizedModelIds } from '@fastgpt/service/support/permission/model/auth';
+import { type AuthModeType } from '@fastgpt/service/support/permission/type';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
-    const { messages } = req.body as CreateQuestionGuideParams;
+async function handler(
+  req: ApiRequestProps,
+  _res: NextApiResponse
+): Promise<CreateQuestionGuideResponseType> {
+  const { messages } = parseApiInput({ req, bodySchema: CreateQuestionGuideBodySchema }).body;
 
-    const { tmbId, teamId } = await authChatCert({
-      req,
-      authToken: true
-    });
+  const { tmbId, teamId, authType, isRoot } = await authChatCert({
+    req,
+    authToken: true,
+    authApiKey: true
+  });
+  const modelHandle = await getTeamModelHandle({ teamId });
+  const authorizedIds = await getAuthorizedModelIds({
+    actor:
+      authType === AuthUserTypeEnum.outLink
+        ? { source: 'outLink', teamId, tmbId }
+        : { teamId, tmbId, isRoot: Boolean(isRoot) },
+    handle: modelHandle
+  });
+  const qgModel = modelHandle.getDefaultModelData('llm', { authorizedIds });
 
-    const qgModel = global.llmModels[0];
+  const { result, inputTokens, outputTokens } = await createQuestionGuide({
+    messages: messages as ChatCompletionMessageParam[],
+    model: qgModel,
+    teamId
+  });
 
-    const { result, tokens } = await createQuestionGuide({
-      messages,
-      model: qgModel.model
-    });
+  pushQuestionGuideUsage({
+    model: qgModel,
+    inputTokens,
+    outputTokens,
+    teamId,
+    tmbId
+  });
 
-    jsonRes(res, {
-      data: result
-    });
+  return CreateQuestionGuideResponseSchema.parse(result);
+}
 
-    pushQuestionGuideUsage({
-      tokens,
-      teamId,
-      tmbId
-    });
-  } catch (err) {
-    jsonRes(res, {
-      code: 500,
-      error: err
-    });
+export default NextAPI(handler);
+
+/*
+  Abandoned
+  Different chat source
+  1. token (header)
+  2. apikey (header)
+  3. share page (body: outLinkAuthData)
+*/
+async function authChatCert(props: AuthModeType): Promise<{
+  teamId: string;
+  tmbId: string;
+  authType: AuthUserTypeEnum;
+  apikey: string;
+  isOwner: boolean;
+  canWrite: boolean;
+  isRoot?: boolean;
+  outLinkUid?: string;
+}> {
+  const { shareId, outLinkUid } =
+    ((props.req as ApiRequestProps).body as { outLinkAuthData?: OutLinkChatAuthProps })
+      .outLinkAuthData || {};
+
+  if (shareId && outLinkUid) {
+    const { outLinkConfig, uid } = await authOutLink({ shareId, outLinkUid, req: props.req });
+
+    return {
+      teamId: String(outLinkConfig.teamId),
+      tmbId: String(outLinkConfig.tmbId),
+      authType: AuthUserTypeEnum.outLink,
+      apikey: '',
+      isOwner: false,
+      canWrite: false,
+      outLinkUid: uid
+    };
   }
+  return authCert(props);
 }

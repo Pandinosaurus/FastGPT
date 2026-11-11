@@ -1,43 +1,59 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
-import { getLLMModel, getVectorModel } from '@fastgpt/service/core/ai/model';
-import type { DatasetItemType } from '@fastgpt/global/core/dataset/type.d';
-import { authDataset } from '@fastgpt/service/support/permission/auth/dataset';
+import { NextAPI } from '@/service/middleware/entry';
+import { filterApiDatasetServerPublicData } from '@fastgpt/global/core/dataset/apiDataset/utils';
+import {
+  GetDatasetDetailQuerySchema,
+  GetDatasetDetailResponseSchema,
+  type GetDatasetDetailResponse
+} from '@fastgpt/global/openapi/core/dataset/api';
+import { ReadPermissionVal } from '@fastgpt/global/support/permission/constant';
+import type { ApiRequestProps } from '@fastgpt/next/type';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
+import { getTeamModelHandle } from '@fastgpt/service/core/ai/model/catalog/service';
+import { desensitizeModel } from '@fastgpt/service/core/ai/model/transform';
+import { getDatasetSyncDatasetStatus } from '@fastgpt/service/core/dataset/datasetSync';
+import { getDatasetModelReference } from '@fastgpt/service/core/dataset/model';
+import { hasDatasetTrainingTask } from '@fastgpt/service/core/dataset/training/entity';
+import { authDataset } from '@fastgpt/service/support/permission/dataset/auth';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
-    const { id: datasetId } = req.query as {
-      id: string;
-    };
+async function handler(req: ApiRequestProps): Promise<GetDatasetDetailResponse> {
+  const { id: datasetId } = parseApiInput({ req, querySchema: GetDatasetDetailQuerySchema }).query;
 
-    if (!datasetId) {
-      throw new Error('缺少参数');
-    }
+  // 凭证校验
+  const { dataset, permission } = await authDataset({
+    req,
+    authToken: true,
+    authApiKey: true,
+    datasetId,
+    per: ReadPermissionVal
+  });
 
-    // 凭证校验
-    const { dataset, canWrite, isOwner } = await authDataset({
-      req,
-      authToken: true,
-      authApiKey: true,
-      datasetId,
-      per: 'r'
-    });
+  const [{ status, errorMsg }, hasTrainingTask] = await Promise.all([
+    getDatasetSyncDatasetStatus(datasetId),
+    hasDatasetTrainingTask({ teamId: dataset.teamId, datasetId })
+  ]);
+  const modelHandle = await getTeamModelHandle({ teamId: String(dataset.teamId) });
+  const vectorModel = modelHandle.findModelData(getDatasetModelReference(dataset, 'embedding'), {
+    type: 'embedding'
+  });
+  const agentModel = modelHandle.findModelData(getDatasetModelReference(dataset, 'agent'), {
+    type: 'llm'
+  });
+  const vlmModel = modelHandle.findModelData(getDatasetModelReference(dataset, 'vlm'), {
+    type: 'llm',
+    vision: true
+  });
 
-    jsonRes<DatasetItemType>(res, {
-      data: {
-        ...dataset,
-        vectorModel: getVectorModel(dataset.vectorModel),
-        agentModel: getLLMModel(dataset.agentModel),
-        canWrite,
-        isOwner
-      }
-    });
-  } catch (err) {
-    jsonRes(res, {
-      code: 500,
-      error: err
-    });
-  }
+  return GetDatasetDetailResponseSchema.parse({
+    ...dataset,
+    status,
+    hasTrainingTask,
+    errorMsg,
+    permission,
+    vectorModel: vectorModel ? desensitizeModel(vectorModel) : undefined,
+    agentModel: agentModel ? desensitizeModel(agentModel) : undefined,
+    vlmModel: vlmModel ? desensitizeModel(vlmModel) : undefined,
+    apiDatasetServer: filterApiDatasetServerPublicData(dataset.apiDatasetServer)
+  });
 }
+
+export default NextAPI(handler);

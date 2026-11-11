@@ -1,57 +1,29 @@
-import { DatasetTrainingSchemaType } from '@fastgpt/global/core/dataset/type';
-import { addLog } from '../../../common/system/log';
-import { getErrText } from '@fastgpt/global/common/error/utils';
-import { MongoDatasetTraining } from './schema';
-import Papa from 'papaparse';
+import { TrainingModeEnum } from '@fastgpt/global/core/dataset/constants';
+import { DatasetDataIndexStatusEnum } from '@fastgpt/global/core/dataset/data/constants';
 
-export const checkInvalidChunkAndLock = async ({
-  err,
-  errText,
-  data
-}: {
-  err: any;
-  errText: string;
-  data: DatasetTrainingSchemaType;
-}) => {
-  if (err?.response) {
-    addLog.error(`openai error: ${errText}`, {
-      status: err.response?.status,
-      statusText: err.response?.statusText,
-      data: err.response?.data
-    });
-  } else {
-    addLog.error(getErrText(err, errText), err);
-  }
-
-  if (
-    err?.message === 'invalid message format' ||
-    err?.type === 'invalid_request_error' ||
-    err?.code === 500
-  ) {
-    addLog.info('Lock training data');
-    console.log(err);
-
-    try {
-      await MongoDatasetTraining.findByIdAndUpdate(data._id, {
-        lockTime: new Date('2998/5/5')
-      });
-    } catch (error) {}
-    return true;
-  }
-  return false;
+/** 两种重建分别维护 data 状态，普通训练始终使用首次索引状态。 */
+export const getTrainingDataIndexStatuses = (mode: TrainingModeEnum) => {
+  if (mode === TrainingModeEnum.rebuildIndex)
+    return {
+      running: DatasetDataIndexStatusEnum.rebuildIndexRunning,
+      failed: DatasetDataIndexStatusEnum.rebuildIndexFailed
+    };
+  if (mode === TrainingModeEnum.rebuildSynonym)
+    return {
+      running: DatasetDataIndexStatusEnum.rebuildSynonymRunning,
+      failed: DatasetDataIndexStatusEnum.rebuildSynonymFailed
+    };
+  return { running: DatasetDataIndexStatusEnum.indexing, failed: DatasetDataIndexStatusEnum.error };
 };
 
-export const parseCsvTable2Chunks = (rawText: string) => {
-  const csvArr = Papa.parse(rawText).data as string[][];
-
-  const chunks = csvArr
-    .map((item) => ({
-      q: item[0] || '',
-      a: item[1] || ''
-    }))
-    .filter((item) => item.q || item.a);
-
-  return {
-    chunks
-  };
-};
+/** 恢复可领取状态；是否重新启用 TTL 由业务入口明确决定，默认保留原过期策略。 */
+export const getTrainingTaskReadyUpdate = ({
+  restoreExpiration = false
+}: { restoreExpiration?: boolean } = {}) => ({
+  $set: {
+    retryCount: 3,
+    lockTime: new Date(0),
+    ...(restoreExpiration ? { expireAt: new Date() } : {})
+  },
+  $unset: { errorMsg: '' }
+});

@@ -1,32 +1,38 @@
-import React, { useEffect } from 'react';
-import { useSystemStore } from '@/web/common/system/useSystemStore';
-import { LLMModelTypeEnum, llmModelTypeFilterMap } from '@fastgpt/global/core/ai/constants';
-import { Box, Button, useDisclosure } from '@chakra-ui/react';
-import { SettingAIDataType } from '@fastgpt/global/core/module/node/type';
-import AISettingModal from '@/components/core/ai/AISettingModal';
-import Avatar from '@/components/Avatar';
-import { HUGGING_FACE_ICON } from '@fastgpt/global/common/system/constants';
+import AISettingModal, { type AIChatSettingsModalProps } from '@/components/core/ai/AISettingModal';
+import AIModelSelector from '@/components/Select/AIModelSelector';
+import { getModelDetail } from '@/web/core/ai/model/modelData';
+import { Box, css, HStack, IconButton, useDisclosure } from '@chakra-ui/react';
+import { ModelTypeEnum } from '@fastgpt/global/core/ai/constants';
+import { getLLMSupportParams } from '@fastgpt/global/core/ai/llm/utils';
+import type { SettingAIDataType } from '@fastgpt/global/core/app/type';
+import MyIcon from '@fastgpt/web/components/common/Icon';
+import MyTooltip from '@fastgpt/web/components/common/MyTooltip';
+import { useTranslation } from 'next-i18next';
+import React, { useEffect, useRef } from 'react';
+import { useToast } from '@fastgpt/web/hooks/useToast';
+import { filterModelMultimodalSettings } from './utils';
 
 type Props = {
-  llmModelType?: `${LLMModelTypeEnum}`;
   defaultData: SettingAIDataType;
   onChange: (e: SettingAIDataType) => void;
+  bg?: string;
 };
 
-const SettingLLMModel = ({ llmModelType = LLMModelTypeEnum.all, defaultData, onChange }: Props) => {
-  const { llmModelList } = useSystemStore();
-
-  const model = defaultData.model;
-
-  const modelList = llmModelList.filter((model) => {
-    if (!llmModelType) return true;
-    const filterField = llmModelTypeFilterMap[llmModelType];
-    if (!filterField) return true;
-    //@ts-ignore
-    return !!model[filterField];
-  });
-
-  const selectedModel = modelList.find((item) => item.model === model) || modelList[0];
+const SettingLLMModel = ({ defaultData, onChange, ...props }: AIChatSettingsModalProps & Props) => {
+  const { t } = useTranslation();
+  const modelId = defaultData.modelId;
+  const { toast } = useToast();
+  const latestData = useRef(defaultData);
+  const selectionRevision = useRef(0);
+  useEffect(() => {
+    latestData.current = defaultData;
+  }, [defaultData]);
+  useEffect(
+    () => () => {
+      selectionRevision.current++;
+    },
+    []
+  );
 
   const {
     isOpen: isOpenAIChatSetting,
@@ -34,37 +40,74 @@ const SettingLLMModel = ({ llmModelType = LLMModelTypeEnum.all, defaultData, onC
     onClose: onCloseAIChatSetting
   } = useDisclosure();
 
-  useEffect(() => {
-    if (!model && modelList.length > 0) {
-      onChange({
-        ...defaultData,
-        model: modelList[0].model
-      });
-    }
-  }, [defaultData, model, modelList, onChange]);
-
   return (
-    <Box position={'relative'}>
-      <Button
-        w={'100%'}
-        justifyContent={'flex-start'}
-        variant={'whitePrimary'}
-        _active={{
-          transform: 'none'
-        }}
-        leftIcon={
-          <Avatar
-            borderRadius={'0'}
-            src={selectedModel.avatar || HUGGING_FACE_ICON}
-            fallbackSrc={HUGGING_FACE_ICON}
-            w={'18px'}
-          />
+    <Box
+      css={css({
+        span: {
+          display: 'block'
         }
-        pl={4}
-        onClick={onOpenAIChatSetting}
-      >
-        {selectedModel?.name}
-      </Button>
+      })}
+      position={'relative'}
+      minW={0}
+      maxW={'100%'}
+    >
+      <HStack spacing={1} minW={0}>
+        <Box flex={'1 1 0'} minW={0}>
+          <AIModelSelector
+            {...props}
+            modelType={ModelTypeEnum.llm}
+            w={'100%'}
+            value={modelId}
+            onChange={async (e) => {
+              const revision = ++selectionRevision.current;
+              const next = { ...defaultData, modelId: e };
+              latestData.current = next;
+              onChange(next);
+              const modelData = await getModelDetail({
+                modelId: e,
+                modelType: ModelTypeEnum.llm
+              }).catch(() => {
+                if (selectionRevision.current === revision)
+                  toast({ status: 'error', title: t('common:model_detail_load_failed') });
+              });
+              if (
+                !modelData ||
+                selectionRevision.current !== revision ||
+                latestData.current.modelId !== e
+              )
+                return;
+              const currentData = latestData.current;
+              const settings = (() => {
+                // 只清理有显式开关的工作流配置，隐藏配置的表单交给后端判断模型能力。
+                if (
+                  props.showMultimodalConfig === false ||
+                  currentData.aiChatVision === undefined ||
+                  !modelData
+                ) {
+                  return currentData;
+                }
+                return filterModelMultimodalSettings({
+                  settings: currentData,
+                  support: getLLMSupportParams(modelData)
+                });
+              })();
+              onChange({
+                ...settings,
+                modelId: e
+              });
+            }}
+          />
+        </Box>
+        <MyTooltip label={t('app:config_ai_model_params')}>
+          <IconButton
+            variant={'transparentBase'}
+            icon={<MyIcon name="common/settingLight" w={'1.2rem'} />}
+            aria-label={''}
+            size={'mdSquare'}
+            onClick={onOpenAIChatSetting}
+          />
+        </MyTooltip>
+      </HStack>
       {isOpenAIChatSetting && (
         <AISettingModal
           onClose={onCloseAIChatSetting}
@@ -73,7 +116,7 @@ const SettingLLMModel = ({ llmModelType = LLMModelTypeEnum.all, defaultData, onC
             onCloseAIChatSetting();
           }}
           defaultData={defaultData}
-          llmModels={modelList}
+          {...props}
         />
       )}
     </Box>

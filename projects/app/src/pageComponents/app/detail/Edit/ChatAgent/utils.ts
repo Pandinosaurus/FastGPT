@@ -1,0 +1,432 @@
+import {
+  AppFormEditFormV1TypeSchema,
+  type SelectedAgentSkillItemType,
+  type SelectedToolItemType,
+  type AppFormEditFormType
+} from '@fastgpt/global/core/app/formEdit/type';
+import type { AppChatConfigType } from '@fastgpt/global/core/app/type';
+import type { StoreNodeItemType } from '@fastgpt/global/core/workflow/type/node';
+import {
+  FlowNodeInputTypeEnum,
+  FlowNodeTypeEnum
+} from '@fastgpt/global/core/workflow/node/constant';
+import {
+  NodeInputKeyEnum,
+  NodeOutputKeyEnum,
+  WorkflowIOValueTypeEnum
+} from '@fastgpt/global/core/workflow/constants';
+import type { StoreEdgeItemType } from '@fastgpt/global/core/workflow/type/edge';
+import { WorkflowStart } from '@fastgpt/global/core/workflow/template/system/workflowStart';
+import { userFilesInput } from '@fastgpt/global/core/workflow/template/output';
+import { i18nT } from '@fastgpt/global/common/i18n/utils';
+import { workflowStartNodeId } from '@/web/core/app/constants';
+import { AgentNode } from '@fastgpt/global/core/workflow/template/system/agent/index';
+import { getDefaultAppForm } from '@fastgpt/global/core/app/utils';
+import type { FlowNodeInputItemType } from '@fastgpt/global/core/workflow/type/io';
+import { getAppChatConfig } from '@fastgpt/global/common/app/chat';
+import { Input_Template_File_Link } from '@fastgpt/global/core/workflow/template/input';
+import {
+  serializeAgentTool,
+  validateToolConfiguration
+} from '@fastgpt/global/core/app/formEdit/utils';
+import { getNewToolPreviewNode } from '@/web/core/app/api/tool';
+import type { AppFileSelectConfigType } from '@fastgpt/global/core/app/type/config.schema';
+import { DatasetSearchModeEnum } from '@fastgpt/global/core/dataset/constants';
+import { inheritToolInputConfig } from '../FormComponent/ToolSelector/utils';
+import { getToolIdentityKey } from '@fastgpt/global/core/app/tool/utils';
+
+/* format app nodes to edit form */
+export const appWorkflow2AgentForm = ({
+  nodes,
+  chatConfig
+}: {
+  nodes: StoreNodeItemType[];
+  chatConfig: AppChatConfigType;
+}) => {
+  const defaultAppForm = getDefaultAppForm();
+  defaultAppForm.chatConfig = getAppChatConfig({
+    chatConfig,
+    isPublicFetch: true
+  });
+  const findInputValueByKey = (inputs: FlowNodeInputItemType[], key: string) => {
+    return inputs.find((item) => item.key === key)?.value;
+  };
+
+  nodes.forEach((node) => {
+    const inputMap = new Map(node.inputs.map((input) => [input.key, input.value]));
+    if (node.flowNodeType === FlowNodeTypeEnum.agent) {
+      defaultAppForm.aiSettings.modelId = findInputValueByKey(
+        node.inputs,
+        NodeInputKeyEnum.aiModelId
+      );
+      defaultAppForm.aiSettings.model = findInputValueByKey(node.inputs, NodeInputKeyEnum.aiModel);
+      defaultAppForm.aiSettings.systemPrompt = inputMap.get(NodeInputKeyEnum.aiSystemPrompt);
+      defaultAppForm.aiSettings.temperature = inputMap.get(NodeInputKeyEnum.aiChatTemperature);
+      defaultAppForm.aiSettings.maxHistories =
+        inputMap.get(NodeInputKeyEnum.history) ?? defaultAppForm.aiSettings.maxHistories;
+      defaultAppForm.aiSettings.aiChatReasoning =
+        inputMap.get(NodeInputKeyEnum.aiChatReasoning) ?? true;
+      defaultAppForm.aiSettings.aiChatReasoningEffort = inputMap.get(
+        NodeInputKeyEnum.aiChatReasoningEffort
+      );
+      defaultAppForm.aiSettings.aiChatTopP = inputMap.get(NodeInputKeyEnum.aiChatTopP);
+      const useAgentSandbox = inputMap.get(NodeInputKeyEnum.useAgentSandbox);
+      defaultAppForm.aiSettings.useAgentSandbox = useAgentSandbox;
+      defaultAppForm.aiSettings.sandboxEntrypoint = inputMap.get(
+        NodeInputKeyEnum.sandboxEntrypoint
+      );
+
+      const tools = inputMap.get(NodeInputKeyEnum.selectedTools) as SelectedToolItemType[];
+      if (tools) {
+        defaultAppForm.selectedTools = tools.map((tool) => ({
+          ...tool,
+          id: tool.pluginId ?? tool.id
+        }));
+      }
+
+      // Dataset configuration
+      const datasetParams = inputMap.get(NodeInputKeyEnum.datasetParams);
+      if (datasetParams) {
+        const parsedDatasetParams = datasetParams as AppFormEditFormType['dataset'];
+        defaultAppForm.dataset = {
+          ...defaultAppForm.dataset,
+          ...parsedDatasetParams,
+          searchMode: parsedDatasetParams.searchMode || DatasetSearchModeEnum.embedding,
+          usingReRank: !!parsedDatasetParams.usingReRank
+        };
+      }
+
+      // Skills configuration
+      const skills = inputMap.get(NodeInputKeyEnum.skills) as
+        | SelectedAgentSkillItemType[]
+        | undefined;
+      if (skills && skills.length > 0) {
+        defaultAppForm.selectedAgentSkills = skills;
+      }
+    }
+  });
+
+  return defaultAppForm;
+};
+
+export type WorkflowType = {
+  nodes: StoreNodeItemType[];
+  edges: StoreEdgeItemType[];
+};
+
+/** 将 Agent 表单转换为工作流，并通过共用 Schema 校验和归一化知识库参数。 */
+export function agentForm2AppWorkflow(
+  data: AppFormEditFormType,
+  t: any // i18nT
+): WorkflowType & {
+  chatConfig: AppChatConfigType;
+} {
+  const aiChatNodeId = '7BdojPlukIQw';
+  const normalizedSandboxEntrypoint = data.aiSettings.sandboxEntrypoint?.trim() || undefined;
+  const modelMultimodal = {
+    // 表单只控制文件上传；媒体传递和链接提取统一放行，实际能力由运行时模型配置判断。
+    vision: true,
+    audio: true,
+    video: true,
+    extractFiles: true
+  };
+  const modelReferenceInputs: FlowNodeInputItemType[] = [
+    ...(data.aiSettings.modelId !== undefined || !data.aiSettings.model
+      ? [
+          {
+            key: NodeInputKeyEnum.aiModelId,
+            renderTypeList: [FlowNodeInputTypeEnum.settingLLMModel],
+            label: t('common:core.module.input.label.aiModel'),
+            valueType: WorkflowIOValueTypeEnum.string,
+            value: data.aiSettings.modelId
+          }
+        ]
+      : []),
+    ...(data.aiSettings.model
+      ? [
+          {
+            key: NodeInputKeyEnum.aiModel,
+            renderTypeList: [FlowNodeInputTypeEnum.settingLLMModel],
+            label: t('common:core.module.input.label.aiModel'),
+            valueType: WorkflowIOValueTypeEnum.string,
+            value: data.aiSettings.model
+          }
+        ]
+      : [])
+  ];
+
+  function workflowStartTemplate(): StoreNodeItemType {
+    return {
+      nodeId: workflowStartNodeId,
+      name: t(WorkflowStart.name),
+      intro: '',
+      avatar: WorkflowStart.avatar,
+      flowNodeType: WorkflowStart.flowNodeType,
+      position: {
+        x: 558.4082376415505,
+        y: 123.72387429194112
+      },
+      version: WorkflowStart.version,
+      inputs: WorkflowStart.inputs,
+      outputs: [...WorkflowStart.outputs, userFilesInput]
+    };
+  }
+  function agentChatTemplate(): WorkflowType {
+    return {
+      nodes: [
+        {
+          nodeId: aiChatNodeId,
+          name: t(AgentNode.name),
+          intro: t(AgentNode.intro),
+          avatar: AgentNode.avatar,
+          flowNodeType: AgentNode.flowNodeType,
+          showStatus: true,
+          position: {
+            x: 1106.3238387960757,
+            y: -350.6030674683474
+          },
+          version: AgentNode.version,
+          inputs: [
+            ...modelReferenceInputs,
+            {
+              key: NodeInputKeyEnum.aiSystemPrompt,
+              renderTypeList: [FlowNodeInputTypeEnum.textarea, FlowNodeInputTypeEnum.reference],
+              label: t('common:core.ai.Prompt'),
+              valueType: WorkflowIOValueTypeEnum.string,
+              value: data.aiSettings.systemPrompt
+            },
+            {
+              ...Input_Template_File_Link,
+              value: [[workflowStartNodeId, NodeOutputKeyEnum.userFiles]]
+            },
+            {
+              key: NodeInputKeyEnum.aiChatVision,
+              renderTypeList: [FlowNodeInputTypeEnum.hidden],
+              label: '',
+              valueType: WorkflowIOValueTypeEnum.boolean,
+              value: modelMultimodal.vision
+            },
+            {
+              key: NodeInputKeyEnum.aiChatAudio,
+              renderTypeList: [FlowNodeInputTypeEnum.hidden],
+              label: '',
+              valueType: WorkflowIOValueTypeEnum.boolean,
+              value: modelMultimodal.audio
+            },
+            {
+              key: NodeInputKeyEnum.aiChatVideo,
+              renderTypeList: [FlowNodeInputTypeEnum.hidden],
+              label: '',
+              valueType: WorkflowIOValueTypeEnum.boolean,
+              value: modelMultimodal.video
+            },
+            {
+              key: NodeInputKeyEnum.aiChatExtractFiles,
+              renderTypeList: [FlowNodeInputTypeEnum.hidden],
+              label: '',
+              valueType: WorkflowIOValueTypeEnum.boolean,
+              value: modelMultimodal.extractFiles
+            },
+            {
+              key: NodeInputKeyEnum.aiChatReasoning,
+              renderTypeList: [FlowNodeInputTypeEnum.hidden],
+              label: '',
+              valueType: WorkflowIOValueTypeEnum.boolean,
+              value: data.aiSettings.aiChatReasoning ?? true
+            },
+            {
+              key: NodeInputKeyEnum.aiChatReasoningEffort,
+              renderTypeList: [FlowNodeInputTypeEnum.hidden],
+              label: '',
+              valueType: WorkflowIOValueTypeEnum.string,
+              value: data.aiSettings.aiChatReasoningEffort
+            },
+            {
+              key: NodeInputKeyEnum.userChatInput,
+              renderTypeList: [FlowNodeInputTypeEnum.reference, FlowNodeInputTypeEnum.textarea],
+              valueType: WorkflowIOValueTypeEnum.string,
+              label: i18nT('common:core.module.input.label.user question'),
+              required: true,
+              toolDescription: i18nT('common:core.module.input.label.user question'),
+              value: [workflowStartNodeId, NodeInputKeyEnum.userChatInput]
+            },
+            {
+              key: NodeInputKeyEnum.selectedTools,
+              renderTypeList: [FlowNodeInputTypeEnum.hidden], // Set in the pop-up window
+              label: '',
+              valueType: WorkflowIOValueTypeEnum.arrayObject,
+              value: data.selectedTools.map((tool) => serializeAgentTool({ tool }))
+            },
+            // Dataset configuration
+            {
+              key: NodeInputKeyEnum.datasetParams,
+              renderTypeList: [FlowNodeInputTypeEnum.hidden],
+              label: '',
+              valueType: WorkflowIOValueTypeEnum.object,
+              value: AppFormEditFormV1TypeSchema.shape.dataset.parse({
+                datasets: data.dataset.datasets,
+                similarity: data.dataset.similarity,
+                limit: data.dataset.limit,
+                searchMode: data.dataset.searchMode,
+                embeddingWeight: data.dataset.embeddingWeight,
+                usingReRank: data.dataset.usingReRank,
+                rerankModelId: data.dataset.rerankModelId,
+                rerankModel: data.dataset.rerankModel,
+                rerankWeight: data.dataset.rerankWeight,
+                rerankCandidateNum: data.dataset.rerankCandidateNum,
+                datasetSearchUsingExtensionQuery: data.dataset.datasetSearchUsingExtensionQuery,
+                datasetSearchExtensionModelId: data.dataset.datasetSearchExtensionModelId,
+                datasetSearchExtensionModel: data.dataset.datasetSearchExtensionModel,
+                datasetSearchExtensionBg: data.dataset.datasetSearchExtensionBg,
+                collectionFilterMatch: data.dataset.collectionFilterMatch,
+                [NodeInputKeyEnum.authTmbId]: data.dataset.authTmbId
+              })
+            },
+            // agent sandbox
+            {
+              key: NodeInputKeyEnum.useAgentSandbox,
+              renderTypeList: [FlowNodeInputTypeEnum.hidden],
+              label: '',
+              valueType: WorkflowIOValueTypeEnum.boolean,
+              value: data.aiSettings.useAgentSandbox ?? false
+            },
+            {
+              key: NodeInputKeyEnum.sandboxEntrypoint,
+              renderTypeList: [FlowNodeInputTypeEnum.hidden],
+              label: '',
+              valueType: WorkflowIOValueTypeEnum.string,
+              value: normalizedSandboxEntrypoint
+            },
+            // Skills configuration
+            ...(data.selectedAgentSkills && data.selectedAgentSkills.length > 0
+              ? [
+                  {
+                    key: NodeInputKeyEnum.skills,
+                    renderTypeList: [FlowNodeInputTypeEnum.hidden],
+                    label: '',
+                    valueType: WorkflowIOValueTypeEnum.arrayObject,
+                    value: data.selectedAgentSkills.map(
+                      ({ skillId, name, description, avatar }) => ({
+                        skillId,
+                        name,
+                        description,
+                        ...(avatar === undefined ? {} : { avatar })
+                      })
+                    )
+                  }
+                ]
+              : [])
+          ],
+          outputs: AgentNode.outputs
+        }
+      ],
+      edges: [
+        {
+          source: workflowStartNodeId,
+          target: aiChatNodeId,
+          sourceHandle: `${workflowStartNodeId}-source-right`,
+          targetHandle: `${aiChatNodeId}-target-left`
+        }
+      ]
+    };
+  }
+
+  const workflow = agentChatTemplate();
+
+  return {
+    nodes: [workflowStartTemplate(), ...workflow.nodes],
+    edges: workflow.edges,
+    chatConfig: data.chatConfig
+  };
+}
+
+export const getEmptyAgentConfig = (t: any) => {
+  const defaultAppForm = getDefaultAppForm();
+
+  return agentForm2AppWorkflow(
+    {
+      aiSettings: {
+        model: '',
+        maxHistories: 6,
+        isResponseAnswerText: true,
+        aiChatReasoning: true
+      },
+      dataset: {
+        ...defaultAppForm.dataset,
+        datasets: [],
+        searchMode: DatasetSearchModeEnum.embedding
+      },
+      selectedTools: [],
+      chatConfig: {}
+    },
+    t
+  );
+};
+
+/** 加载辅助生成的工具，按来源复用已有配置；旧引用未记录来源时按 system 匹配。 */
+export const loadGeneratedTools = async ({
+  newToolIds,
+  existsTools = [],
+  generatedSelectedTools = [],
+  fileSelectConfig
+}: {
+  newToolIds: Array<string | { id: string; source?: string }>; // 新的，完整的 toolId
+  existsTools?: SelectedToolItemType[];
+  generatedSelectedTools?: SelectedToolItemType[];
+  fileSelectConfig?: AppFileSelectConfigType;
+}): Promise<SelectedToolItemType[]> => {
+  const results = (
+    await Promise.all(
+      newToolIds.map<Promise<SelectedToolItemType | undefined>>(async (toolRef) => {
+        const toolId = typeof toolRef === 'string' ? toolRef : toolRef.id;
+        const source = typeof toolRef === 'string' ? undefined : toolRef.source;
+        const identityKey = getToolIdentityKey(toolId, source);
+        // 已经存在的工具，直接返回
+        const existTool = existsTools.find(
+          (tool) => getToolIdentityKey(tool.pluginId, tool.source) === identityKey
+        );
+        if (existTool) {
+          // 新提示词使用带来源的引用；复用旧配置时也要补齐来源，才能与运行时引用一致。
+          if (source === 'system' && !existTool.source) {
+            return { ...existTool, source };
+          }
+          return existTool;
+        }
+
+        // 新工具，需要与已配置的 tool 进行 input 合并
+        const tool = await getNewToolPreviewNode({
+          appId: toolId,
+          source
+        });
+        // 验证工具配置
+        const toolValid = validateToolConfiguration({
+          toolTemplate: tool,
+          isAppTool: true,
+          canUploadFile: !!(
+            fileSelectConfig?.canSelectFile ||
+            fileSelectConfig?.canSelectImg ||
+            fileSelectConfig?.canSelectVideo ||
+            fileSelectConfig?.canSelectAudio ||
+            fileSelectConfig?.canSelectCustomFileExtension
+          )
+        });
+        if (!toolValid) {
+          return;
+        }
+
+        const generatedTool = generatedSelectedTools.find(
+          (item) => getToolIdentityKey(item.pluginId, item.source) === identityKey
+        );
+        const inheritedTool = inheritToolInputConfig({ tool, sourceTool: generatedTool });
+
+        return {
+          ...inheritedTool,
+          id: toolId,
+          source
+        };
+      })
+    )
+  ).filter((item) => item !== undefined);
+
+  return results;
+};

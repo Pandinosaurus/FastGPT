@@ -1,34 +1,50 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
-import { authDataset } from '@fastgpt/service/support/permission/auth/dataset';
+import type { ApiRequestProps } from '@fastgpt/next/type';
+import { authDataset } from '@fastgpt/service/support/permission/dataset/auth';
 import { checkExportDatasetLimit } from '@fastgpt/service/support/user/utils';
+import { NextAPI } from '@/service/middleware/entry';
+import { WritePermissionVal } from '@fastgpt/global/support/permission/constant';
+import { addAuditLog } from '@fastgpt/service/support/user/audit/util';
+import { AuditEventEnum } from '@fastgpt/global/support/user/audit/constants';
+import { getI18nDatasetType } from '@fastgpt/service/support/user/audit/util';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
+import {
+  ExportDatasetLimitQuerySchema,
+  ExportDatasetLimitResponseSchema,
+  type ExportDatasetLimitResponse
+} from '@fastgpt/global/openapi/support/user/team/limit/api';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
-    const { datasetId } = req.query as {
-      datasetId: string;
-    };
+async function handler(req: ApiRequestProps): Promise<ExportDatasetLimitResponse> {
+  const { datasetId } = parseApiInput({
+    req,
+    querySchema: ExportDatasetLimitQuerySchema
+  }).query;
 
-    if (!datasetId) {
-      throw new Error('datasetId is required');
-    }
+  // 凭证校验
+  const { teamId, tmbId, dataset } = await authDataset({
+    req,
+    authToken: true,
+    datasetId,
+    per: WritePermissionVal
+  });
 
-    // 凭证校验
-    const { teamId } = await authDataset({ req, authToken: true, datasetId, per: 'w' });
+  await checkExportDatasetLimit({
+    teamId,
+    limitMinutes: global.feConfigs?.limit?.exportDatasetLimitMinutes
+  });
 
-    await checkExportDatasetLimit({
+  (async () => {
+    addAuditLog({
+      tmbId,
       teamId,
-      limitMinutes: global.feConfigs?.limit?.exportDatasetLimitMinutes
+      event: AuditEventEnum.EXPORT_DATASET,
+      params: {
+        datasetName: dataset.name,
+        datasetType: getI18nDatasetType(dataset.type)
+      }
     });
+  })();
 
-    jsonRes(res);
-  } catch (err) {
-    res.status(500);
-    jsonRes(res, {
-      code: 500,
-      error: err
-    });
-  }
+  return ExportDatasetLimitResponseSchema.parse(undefined);
 }
+
+export default NextAPI(handler);

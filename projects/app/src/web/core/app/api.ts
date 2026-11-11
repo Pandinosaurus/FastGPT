@@ -1,62 +1,100 @@
 import { GET, POST, DELETE, PUT } from '@/web/common/api/request';
-import type { AppDetailType, AppListItemType } from '@fastgpt/global/core/app/type.d';
-import { RequestPaging } from '@/types/index';
-import { addDays } from 'date-fns';
-import type { GetAppChatLogsParams } from '@/global/core/api/appReq.d';
-import type { CreateAppParams, AppUpdateParams } from '@fastgpt/global/core/app/api.d';
+import type { AppPermissionCheckType } from '@fastgpt/global/support/permission/app/controller.schema';
+import type {
+  BatchResourceActionResponse,
+  BatchResourceDeleteBody,
+  BatchResourceMoveBody
+} from '@fastgpt/global/openapi/common/batch/api';
+
+import type {
+  CreateAppBodyType,
+  CreateAppResponseType,
+  DeleteAppQueryType,
+  DeleteAppResponseType,
+  GetAppBasicInfoBodyType,
+  GetAppBasicInfoResponseType,
+  GetAppDetailQueryType,
+  GetAppDetailResponseType,
+  ListAppBodyType,
+  ListAppResponseType,
+  ListAppV2BodyType,
+  ListAppV2ResponseType,
+  UpdateAppQueryType,
+  UpdateAppBodyType,
+  UpdateAppResponseType
+} from '@fastgpt/global/openapi/core/app/common/api';
+import type {
+  GetAppPermissionQueryType,
+  ChangeAppOwnerBodyType,
+  ChangeAppOwnerResponseType,
+  ResumeInheritPermissionQueryType,
+  ResumeInheritPermissionResponseType
+} from '@fastgpt/global/openapi/core/app/permission/api';
 
 /**
- * 获取模型列表
+ * 获取应用列表
+ * @deprecated 使用 getMyAppsV2，并按分页协议获取列表。
  */
-export const getMyApps = () => GET<AppListItemType[]>('/core/app/list');
+export const getMyApps = (data?: ListAppBodyType) =>
+  POST<ListAppResponseType>('/core/app/list', data, {
+    maxQuantity: 1
+  });
+
+export const getMyAppsV2 = (data?: ListAppV2BodyType, cancelToken?: AbortController) =>
+  POST<ListAppV2ResponseType>('/core/app/listV2', data, {
+    maxQuantity: 1,
+    cancelToken
+  });
 
 /**
- * 创建一个模型
+ * 获取当前筛选条件下的全部应用，供需要跨页遍历资源的选择器使用。
+ * @deprecated 使用 getMyAppsV2，并按需加载后续页。
  */
-export const postCreateApp = (data: CreateAppParams) => POST<string>('/core/app/create', data);
-
-export const getMyAppsByTags = (data: {}) => POST(`/proApi/core/chat/team/getApps`, data);
-/**
- * 根据 ID 删除模型
- */
-export const delModelById = (id: string) => DELETE(`/core/app/del?appId=${id}`);
+export const getAllApps = (data?: ListAppBodyType) => getMyApps(data);
 
 /**
- * 根据 ID 获取模型
+ * 创建一个应用
  */
-export const getModelById = (id: string) => GET<AppDetailType>(`/core/app/detail?appId=${id}`);
+export const postCreateApp = (data: CreateAppBodyType) =>
+  POST<CreateAppResponseType>('/core/app/create', data);
 
 /**
- * 根据 ID 更新模型
+ * 根据 ID 删除应用
  */
-export const putAppById = (id: string, data: AppUpdateParams) =>
-  PUT(`/core/app/update?appId=${id}`, data);
-export const replaceAppById = (id: string, data: AppUpdateParams) =>
-  PUT(`/core/app/updateTeamTasg?appId=${id}`, data);
-
-// updateTeamTasg
-export const putAppTagsById = (id: string, data: AppUpdateParams) =>
-  PUT(`/core/app/updateTeamTasg?appId=${id}`, data);
-/* 共享市场 */
-/**
- * 获取共享市场模型
- */
-export const getShareModelList = (data: { searchText?: string } & RequestPaging) =>
-  POST(`/core/app/share/getModels`, data);
+export const delAppById = (id: DeleteAppQueryType['appId']) =>
+  DELETE<DeleteAppResponseType>(`/core/app/del?appId=${id}`);
 
 /**
- * 收藏/取消收藏模型
+ * 根据 ID 获取应用
  */
-export const triggerModelCollection = (appId: string) =>
-  POST<number>(`/core/app/share/collection?appId=${appId}`);
+export const getAppDetailById = (id: GetAppDetailQueryType['appId']) =>
+  GET<GetAppDetailResponseType>(`/core/app/detail?appId=${id}`);
 
-// ====================== data
-export const getAppTotalUsage = (data: { appId: string }) =>
-  POST<{ date: String; total: number }[]>(`/core/app/data/totalUsage`, {
-    ...data,
-    start: addDays(new Date(), -13),
-    end: addDays(new Date(), 1)
-  }).then((res) => (res.length === 0 ? [{ date: new Date(), total: 0 }] : res));
+/**
+ * 根据 ID 更新应用
+ */
+export const putAppById = (id: UpdateAppQueryType['appId'], data: UpdateAppBodyType) =>
+  PUT<UpdateAppResponseType>(`/core/app/update?appId=${id}`, data);
 
-// =================== chat logs
-export const getAppChatLogs = (data: GetAppChatLogsParams) => POST(`/core/app/getChatLogs`, data);
+export const batchMoveApps = (data: BatchResourceMoveBody) =>
+  POST<BatchResourceActionResponse>('/core/app/batch/move', data);
+
+export const batchDeleteApps = (data: BatchResourceDeleteBody) =>
+  POST<BatchResourceActionResponse>('/core/app/batch/delete', data);
+
+export const getAppPermission = (appId: GetAppPermissionQueryType['appId']) =>
+  GET<AppPermissionCheckType>(`/core/app/getPermission?appId=${appId}`);
+
+/**
+ * Get app basic info by ids
+ */
+export const getAppBasicInfoByIds = (ids: GetAppBasicInfoBodyType['ids']) =>
+  POST<GetAppBasicInfoResponseType>(`/core/app/getBasicInfo`, { ids });
+
+export const resumeInheritPer = (appId: ResumeInheritPermissionQueryType['appId']) =>
+  PUT<ResumeInheritPermissionResponseType>(`/core/app/resumeInheritPermission?appId=${appId}`).then(
+    () => undefined
+  );
+
+export const changeOwner = (data: ChangeAppOwnerBodyType) =>
+  POST<ChangeAppOwnerResponseType>(`/proApi/core/app/changeOwner`, data);

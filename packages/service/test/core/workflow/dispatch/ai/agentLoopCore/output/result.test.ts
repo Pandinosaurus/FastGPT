@@ -1,0 +1,266 @@
+import { summarizeAgentLoopCoreResult } from '@fastgpt/service/core/workflow/dispatch/ai/agentLoopCore/application/output/result';
+import { describe, expect, it } from 'vitest';
+
+describe('summarizeAgentLoopCoreResult', () => {
+  it('normalizes done result usage and finish reason', () => {
+    expect(
+      summarizeAgentLoopCoreResult({
+        status: 'done',
+        requestIds: ['req_1'],
+        completeMessages: [],
+        assistantMessages: [
+          {
+            role: 'assistant',
+            content: 'step 1 ',
+            reasoning_content: 'think 1 ',
+            tool_calls: [
+              {
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'search', arguments: '{}' }
+              }
+            ]
+          },
+          {
+            role: 'assistant',
+            content: 'answer',
+            reasoning_content: 'reason'
+          }
+        ],
+        assistantResponses: [{ text: { content: 'step 1 ' } }, { text: { content: 'answer' } }],
+        finishReason: 'stop',
+        usages: [
+          {
+            moduleName: 'account_usage:agent_call',
+            inputTokens: 10,
+            outputTokens: 5,
+            totalPoints: 1
+          },
+          {
+            moduleName: 'child_tool',
+            inputTokens: 100,
+            outputTokens: 50,
+            totalPoints: 20
+          }
+        ]
+      })
+    ).toEqual(
+      expect.objectContaining({
+        status: 'done',
+        requestIds: ['req_1'],
+        assistantResponses: [{ text: { content: 'step 1 ' } }, { text: { content: 'answer' } }],
+        finishReason: 'stop',
+        usages: expect.arrayContaining([
+          expect.objectContaining({ moduleName: 'account_usage:agent_call' }),
+          expect.objectContaining({ moduleName: 'child_tool' })
+        ]),
+        inputTokens: 10,
+        outputTokens: 5,
+        llmTotalPoints: 1,
+        finalText: 'step 1 answer',
+        reasoningText: 'think 1 reason'
+      })
+    );
+  });
+
+  it('turns errors into final text and treats aborts as normal finishes', () => {
+    expect(
+      summarizeAgentLoopCoreResult({
+        status: 'error',
+        requestIds: [],
+        completeMessages: [],
+        assistantMessages: [
+          {
+            role: 'assistant',
+            content: 'step 1 ',
+            tool_calls: [
+              {
+                id: 'call_1',
+                type: 'function',
+                function: { name: 'search', arguments: '{}' }
+              }
+            ]
+          }
+        ],
+        assistantResponses: [],
+        error: new Error('failed'),
+        finishReason: 'stop',
+        usages: []
+      })
+    ).toEqual(
+      expect.objectContaining({
+        status: 'error',
+        errorText: 'failed',
+        finalText: 'step 1 failed',
+        finishReason: 'stop',
+        inputTokens: 0,
+        outputTokens: 0,
+        llmTotalPoints: 0
+      })
+    );
+
+    const abortedResult = summarizeAgentLoopCoreResult({
+      status: 'aborted',
+      requestIds: [],
+      completeMessages: [],
+      assistantMessages: [],
+      assistantResponses: [],
+      finishReason: 'stop',
+      usages: []
+    });
+
+    expect(abortedResult).toEqual(
+      expect.objectContaining({
+        status: 'aborted'
+      })
+    );
+    expect(abortedResult.errorText).toBeUndefined();
+    expect(abortedResult.finalText).toBeUndefined();
+  });
+
+  it('builds ask interactive and keeps provider state for workflow adapter wrapping', () => {
+    const providerState = {
+      pendingMainContext: {
+        askToolCallId: 'call_ask',
+        messages: []
+      }
+    };
+    const ask = {
+      reason: 'Need input',
+      blockerType: 'missing_required_input' as const,
+      questions: [
+        {
+          question: 'Confirm?',
+          options: [
+            { summary: 'Yes', value: 'Yes' },
+            { summary: 'No', value: 'No' },
+            { summary: 'Not sure', value: 'Not sure' }
+          ]
+        }
+      ]
+    };
+
+    const argumentsText = JSON.stringify(ask, null, 2);
+
+    expect(
+      summarizeAgentLoopCoreResult({
+        status: 'interactive',
+        requestIds: [],
+        completeMessages: [
+          {
+            role: 'assistant',
+            tool_calls: [
+              {
+                id: 'call_ask',
+                type: 'function',
+                function: { name: 'ask_user', arguments: argumentsText }
+              }
+            ]
+          }
+        ],
+        assistantMessages: [],
+        assistantResponses: [],
+        finishReason: 'stop',
+        usages: [],
+        pause: {
+          toolCallId: 'call_ask',
+          interactive: {
+            type: 'agentAsk',
+            params: { toolCallId: 'call_ask', arguments: argumentsText }
+          }
+        },
+        providerState
+      })
+    ).toEqual(
+      expect.objectContaining({
+        status: 'interactive',
+        providerState,
+        interactive: {
+          type: 'agentAsk',
+
+          params: { toolCallId: 'call_ask', arguments: argumentsText }
+        }
+      })
+    );
+  });
+
+  it('keeps time granularity config on userInput form fields', () => {
+    const inputForm = [
+      {
+        type: 'timePointSelect',
+        key: 'startAt',
+        label: '开始时间',
+        value: '',
+        valueType: 'string',
+        required: true,
+        timeGranularity: 'day',
+        timeRangeStart: '2026-01-01 00:00:00',
+        timeRangeEnd: '2026-12-31 23:59:59'
+      }
+    ];
+
+    expect(
+      summarizeAgentLoopCoreResult({
+        status: 'interactive',
+        requestIds: [],
+        completeMessages: [],
+        assistantMessages: [],
+        assistantResponses: [],
+        finishReason: 'stop',
+        usages: [],
+        pause: {
+          toolCallId: 'call_form',
+          interactive: {
+            type: 'userInput',
+            params: {
+              description: '',
+              inputForm
+            }
+          }
+        }
+      }).interactive
+    ).toEqual(
+      expect.objectContaining({
+        type: 'userInput',
+        params: expect.objectContaining({
+          inputForm: [expect.objectContaining(inputForm[0])]
+        })
+      })
+    );
+  });
+
+  it('passes explicitly wrapped workflow state through without adding a wrapper', () => {
+    const childrenResponse = {
+      type: 'userSelect'
+    };
+
+    expect(
+      summarizeAgentLoopCoreResult({
+        status: 'interactive',
+        requestIds: [],
+        completeMessages: [],
+        assistantMessages: [],
+        assistantResponses: [],
+        finishReason: 'stop',
+        usages: [],
+        pause: {
+          toolCallId: 'call_tool',
+          interactive: {
+            type: 'toolChildrenInteractive',
+            params: { childrenResponse, toolCallId: 'call_tool' }
+          }
+        }
+      })
+    ).toEqual(
+      expect.objectContaining({
+        interactive: {
+          type: 'toolChildrenInteractive',
+          params: {
+            childrenResponse,
+            toolCallId: 'call_tool'
+          }
+        }
+      })
+    );
+  });
+});

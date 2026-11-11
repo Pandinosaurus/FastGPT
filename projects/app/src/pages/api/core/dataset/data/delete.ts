@@ -1,40 +1,46 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { withNextCors } from '@fastgpt/service/common/middle/cors';
-import { connectToDatabase } from '@/service/mongo';
-import { authDatasetData } from '@/service/support/permission/auth/dataset';
-import { deleteDatasetData } from '@/service/core/dataset/data/controller';
+import { authDatasetData } from '@fastgpt/service/support/permission/dataset/auth';
+import { deleteDatasetData } from '@/service/core/dataset/data/data';
+import { NextAPI } from '@/service/middleware/entry';
+import { WritePermissionVal } from '@fastgpt/global/support/permission/constant';
+import { addAuditLog } from '@fastgpt/service/support/user/audit/util';
+import { AuditEventEnum } from '@fastgpt/global/support/user/audit/constants';
+import { getI18nDatasetType } from '@fastgpt/service/support/user/audit/util';
+import { type ApiRequestProps } from '@fastgpt/next/type';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
+import {
+  DeleteDatasetDataQuerySchema,
+  DeleteDatasetDataResponseSchema,
+  type DeleteDatasetDataResponse
+} from '@fastgpt/global/openapi/core/dataset/data/api';
 
-export default withNextCors(async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
-    const { id: dataId } = req.query as {
-      id: string;
-    };
+async function handler(req: ApiRequestProps): Promise<DeleteDatasetDataResponse> {
+  const { id: dataId } = parseApiInput({ req, querySchema: DeleteDatasetDataQuerySchema }).query;
 
-    if (!dataId) {
-      throw new Error('dataId is required');
-    }
+  // 凭证校验
+  const { datasetData, tmbId, teamId, collection } = await authDatasetData({
+    req,
+    authToken: true,
+    authApiKey: true,
+    dataId,
+    per: WritePermissionVal,
+    assertWritable: true
+  });
 
-    // 凭证校验
-    const { teamId, datasetData } = await authDatasetData({
-      req,
-      authToken: true,
-      authApiKey: true,
-      dataId,
-      per: 'w'
+  await deleteDatasetData(datasetData);
+
+  (async () => {
+    addAuditLog({
+      tmbId,
+      teamId,
+      event: AuditEventEnum.DELETE_DATA,
+      params: {
+        collectionName: collection.name,
+        datasetName: collection.dataset?.name || '',
+        datasetType: getI18nDatasetType(collection.dataset?.type || '')
+      }
     });
+  })();
+  return DeleteDatasetDataResponseSchema.parse(undefined);
+}
 
-    await deleteDatasetData(datasetData);
-
-    jsonRes(res, {
-      data: 'success'
-    });
-  } catch (err) {
-    console.log(err);
-    jsonRes(res, {
-      code: 500,
-      error: err
-    });
-  }
-});
+export default NextAPI(handler);

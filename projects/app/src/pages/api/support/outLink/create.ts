@@ -1,40 +1,61 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
+import { serviceEnv } from '@fastgpt/service/env';
+import { getNewOutLinkBrandConfig } from '@fastgpt/service/support/outLink/branding/utils';
 import { MongoOutLink } from '@fastgpt/service/support/outLink/schema';
-import { authApp } from '@fastgpt/service/support/permission/auth/app';
-import type { OutLinkEditType } from '@fastgpt/global/support/outLink/type.d';
-import { customAlphabet } from 'nanoid';
-import { OutLinkTypeEnum } from '@fastgpt/global/support/outLink/constant';
-const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz1234567890', 24);
+import { authApp } from '@fastgpt/service/support/permission/app/auth';
+import { ManagePermissionVal } from '@fastgpt/global/support/permission/constant';
+import type { ApiRequestProps } from '@fastgpt/next/type';
+import { NextAPI } from '@/service/middleware/entry';
+import { addAuditLog } from '@fastgpt/service/support/user/audit/util';
+import { AuditEventEnum } from '@fastgpt/global/support/user/audit/constants';
+import { getI18nAppType } from '@fastgpt/service/support/user/audit/util';
+import { getNanoid } from '@fastgpt/global/common/string/tools';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
+import {
+  OutLinkCreateBodySchema,
+  OutLinkCreateResponseSchema,
+  type OutLinkCreateBodyType,
+  type OutLinkCreateResponseType
+} from '@fastgpt/global/openapi/support/outLink/api';
 
-/* create a shareChat */
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  try {
-    await connectToDatabase();
-    const { appId, ...props } = req.body as OutLinkEditType & {
-      appId: string;
-      type: `${OutLinkTypeEnum}`;
-    };
+export async function handler(
+  req: ApiRequestProps<OutLinkCreateBodyType>
+): Promise<OutLinkCreateResponseType> {
+  const { appId, ...props } = parseApiInput({
+    req,
+    bodySchema: OutLinkCreateBodySchema
+  }).body;
 
-    const { teamId, tmbId } = await authApp({ req, authToken: true, appId, per: 'w' });
+  const { teamId, tmbId, app } = await authApp({
+    req,
+    authToken: true,
+    appId,
+    per: ManagePermissionVal
+  });
 
-    const shareId = nanoid();
-    await MongoOutLink.create({
-      shareId,
-      teamId,
+  const shareId = getNanoid(24);
+  await MongoOutLink.create({
+    shareId,
+    teamId,
+    tmbId,
+    appId,
+    ...props,
+    ...getNewOutLinkBrandConfig({ enabled: serviceEnv.SHOW_OUTLINK_BRAND, type: props.type })
+  });
+
+  (async () => {
+    addAuditLog({
       tmbId,
-      appId,
-      ...props
+      teamId,
+      event: AuditEventEnum.CREATE_APP_PUBLISH_CHANNEL,
+      params: {
+        appName: app.name,
+        channelName: props.name,
+        appType: getI18nAppType(app.type)
+      }
     });
+  })();
 
-    jsonRes(res, {
-      data: shareId
-    });
-  } catch (err) {
-    jsonRes(res, {
-      code: 500,
-      error: err
-    });
-  }
+  return OutLinkCreateResponseSchema.parse(shareId);
 }
+
+export default NextAPI(handler);

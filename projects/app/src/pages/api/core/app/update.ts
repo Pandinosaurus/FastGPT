@@ -1,84 +1,150 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
 import { MongoApp } from '@fastgpt/service/core/app/schema';
-import type { AppUpdateParams } from '@fastgpt/global/core/app/api';
-import { authApp } from '@fastgpt/service/support/permission/auth/app';
-import { FlowNodeTypeEnum } from '@fastgpt/global/core/module/node/constant';
-import { ModuleInputKeyEnum } from '@fastgpt/global/core/module/constants';
-import { getLLMModel } from '@fastgpt/service/core/ai/model';
+import { authApp } from '@fastgpt/service/support/permission/app/auth';
+import { NextAPI } from '@/service/middleware/entry';
+import { ReadPermissionVal } from '@fastgpt/global/support/permission/constant';
+import { CommonErrEnum } from '@fastgpt/global/common/error/code/common';
+import { type ApiRequestProps } from '@fastgpt/next/type';
+import { AppTypeEnum } from '@fastgpt/global/core/app/constants';
+import { type ClientSession } from 'mongoose';
+import { AppErrEnum } from '@fastgpt/global/common/error/code/app';
+import { addAuditLog } from '@fastgpt/service/support/user/audit/util';
+import { AuditEventEnum } from '@fastgpt/global/support/user/audit/constants';
+import { getI18nAppType } from '@fastgpt/service/support/user/audit/util';
+import { i18nT } from '@fastgpt/global/common/i18n/utils';
+import { getS3AvatarSource } from '@fastgpt/service/common/s3/sources/avatar';
+import { updateParentFoldersUpdateTime } from '@fastgpt/service/core/app/controller';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
+import {
+  UpdateAppBodySchema,
+  UpdateAppQuerySchema,
+  type UpdateAppBodyType,
+  type UpdateAppQueryType
+} from '@fastgpt/global/openapi/core/app/common/api';
+import { moveApp } from '@/service/core/app/move';
 
-/* 获取我的模型 */
-export default async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
-    const { name, avatar, type, intro, modules, permission, teamTags } =
-      req.body as AppUpdateParams;
-    const { appId } = req.query as { appId: string };
+/**
+ * 更新应用接口
+ * 1. 若包含 parentId，则复用 moveApp 服务完成鉴权、层级检查、权限继承与移动操作；
+ * 2. 若包含基础信息（名称、类型、头像、介绍等），则校验写权限并更新。
+ */
+async function handler(req: ApiRequestProps<UpdateAppBodyType, UpdateAppQueryType>): Promise<void> {
+  const {
+    query: { appId },
+    body: { parentId, name, avatar, type, intro }
+  } = parseApiInput({
+    req,
+    querySchema: UpdateAppQuerySchema,
+    bodySchema: UpdateAppBodySchema
+  });
 
-    if (!appId) {
-      throw new Error('appId is empty');
+  if (!appId) {
+    return Promise.reject(CommonErrEnum.missingParams);
+  }
+
+  // 1. 移动分支：直接调用 moveApp 统一服务
+  if (parentId !== undefined) {
+    await moveApp({ req, appId, parentId });
+  }
+
+  const hasOtherFields =
+    name !== undefined || type !== undefined || avatar !== undefined || intro !== undefined;
+
+  // 纯移动操作，无需执行后续属性更新
+  if (!hasOtherFields) {
+    return;
+  }
+
+  // 2. 基础属性更新
+  const { app, permission, teamId, tmbId } = await authApp({
+    req,
+    authToken: true,
+    appId,
+    per: ReadPermissionVal
+  });
+
+  if (!app) {
+    return Promise.reject(AppErrEnum.unExist);
+  }
+
+  if (!permission.hasWritePer) {
+    return Promise.reject(AppErrEnum.unAuthApp);
+  }
+
+  const onUpdate = async (session?: ClientSession) => {
+    if (app.type === AppTypeEnum.mcpToolSet && avatar) {
+      await MongoApp.updateMany({ parentId: appId, teamId: app.teamId }, { avatar }, { session });
     }
 
-    // 凭证校验
-    await authApp({ req, authToken: true, appId, per: permission ? 'owner' : 'w' });
+    await getS3AvatarSource().refreshAvatar(avatar, app.avatar, session);
 
-    // check modules
-    // 1. dataset search limit, less than model quoteMaxToken
-    if (modules) {
-      let maxTokens = 3000;
-
-      modules.forEach((item) => {
-        if (
-          item.flowType === FlowNodeTypeEnum.chatNode ||
-          item.flowType === FlowNodeTypeEnum.tools
-        ) {
-          const model =
-            item.inputs.find((item) => item.key === ModuleInputKeyEnum.aiModel)?.value || '';
-          const chatModel = getLLMModel(model);
-          const quoteMaxToken = chatModel.quoteMaxToken || 3000;
-
-          maxTokens = Math.max(maxTokens, quoteMaxToken);
-        }
-      });
-
-      modules.forEach((item) => {
-        if (item.flowType === FlowNodeTypeEnum.datasetSearchNode) {
-          item.inputs.forEach((input) => {
-            if (input.key === ModuleInputKeyEnum.datasetMaxTokens) {
-              const val = input.value as number;
-              if (val > maxTokens) {
-                input.value = maxTokens;
-              }
-            }
-          });
-        }
-      });
-    }
-
-    // 更新模型
-    await MongoApp.updateOne(
+    await MongoApp.findByIdAndUpdate(
+      appId,
       {
-        _id: appId
+        ...(name && { name }),
+        ...(type && { type }),
+        ...(avatar && { avatar }),
+        ...(intro !== undefined && { intro }),
+        updateTime: new Date()
       },
-      {
-        name,
-        type,
-        avatar,
-        intro,
-        permission,
-        teamTags: teamTags,
-        ...(modules && {
-          modules
-        })
-      }
+      { session }
     );
 
-    jsonRes(res);
-  } catch (err) {
-    jsonRes(res, {
-      code: 500,
-      error: err
+    updateParentFoldersUpdateTime({
+      parentId: app.parentId
     });
-  }
+  };
+
+  logAppUpdate({ tmbId, teamId, app, name, intro: intro ?? undefined });
+
+  await onUpdate();
 }
+
+export default NextAPI(handler);
+
+const logAppUpdate = ({
+  tmbId,
+  teamId,
+  app,
+  name,
+  intro
+}: {
+  tmbId: string;
+  teamId: string;
+  app: any;
+  name?: string;
+  intro?: string;
+}) => {
+  const getUpdateItems = () => {
+    const names: string[] = [];
+    const values: string[] = [];
+
+    if (name !== undefined) {
+      names.push(i18nT('common:name'));
+      values.push(name);
+    }
+
+    if (intro !== undefined) {
+      names.push(i18nT('common:Intro'));
+      values.push(intro);
+    }
+
+    return {
+      names,
+      values
+    };
+  };
+
+  const { names: newItemNames, values: newItemValues } = getUpdateItems();
+
+  addAuditLog({
+    tmbId,
+    teamId,
+    event: AuditEventEnum.UPDATE_APP_INFO,
+    params: {
+      appName: app.name,
+      newItemNames: newItemNames,
+      newItemValues: newItemValues,
+      appType: getI18nAppType(app.type)
+    }
+  });
+};

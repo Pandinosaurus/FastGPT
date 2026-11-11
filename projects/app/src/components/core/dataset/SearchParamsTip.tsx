@@ -1,84 +1,135 @@
-import { useSystemStore } from '@/web/common/system/useSystemStore';
-import { Flex, Table, Thead, Tbody, Tr, Th, Td, TableContainer } from '@chakra-ui/react';
-import {
-  DatasetSearchModeEnum,
-  DatasetSearchModeMap
-} from '@fastgpt/global/core/dataset/constants';
+import { FixedTableContainer } from '@fastgpt/web/components/common/FixedTable';
+import { ModelStatusLabel } from '@/components/Select/ModelStatusLabel';
+import { useModelSummary } from '@/web/core/ai/model/useModelSummary';
+import { Flex, Table, Tbody, Td, Th, Thead, Tr } from '@chakra-ui/react';
+import { DatasetSearchModeEnum } from '@fastgpt/global/core/dataset/constants';
+import { isDatasetTagFilterOpen } from '@fastgpt/global/core/dataset/search/tagFilter';
+import type { AppDatasetSearchParamsType } from '@fastgpt/global/core/app/type';
 import { useTranslation } from 'next-i18next';
-import React, { useMemo } from 'react';
-import MyIcon from '@fastgpt/web/components/common/Icon';
+import React from 'react';
 
+/**
+ * 知识库搜索参数摘要卡片：
+ * 展示检索模式、引用上限、最低相关度、结果重排、问题优化，以及可选的标签过滤开启状态。
+ */
 const SearchParamsTip = ({
   searchMode,
   similarity = 0,
-  limit = 1500,
+  limit = 5000,
   responseEmptyText,
   usingReRank = false,
-  usingQueryExtension = false
+  usingExtensionQuery,
+  queryExtensionModel,
+  showTagFilter = false,
+  collectionFilterMatch
 }: {
   searchMode: `${DatasetSearchModeEnum}`;
   similarity?: number;
   limit?: number;
   responseEmptyText?: string;
   usingReRank?: boolean;
-  usingQueryExtension?: boolean;
+  usingExtensionQuery?: boolean;
+  queryExtensionModel?: string;
+  showTagFilter?: boolean;
+  collectionFilterMatch?: AppDatasetSearchParamsType['collectionFilterMatch'];
 }) => {
   const { t } = useTranslation();
-  const { reRankModelList } = useSystemStore();
+  const detailState = useModelSummary({
+    modelId: usingExtensionQuery ? queryExtensionModel : undefined
+  });
 
-  const hasReRankModel = reRankModelList.length > 0;
+  const hasReRankModel = true;
   const hasEmptyResponseMode = responseEmptyText !== undefined;
   const hasSimilarityMode = usingReRank || searchMode === DatasetSearchModeEnum.embedding;
+  const isTagFilterEnabled = isDatasetTagFilterOpen(collectionFilterMatch);
+  const searchModeLabel = {
+    [DatasetSearchModeEnum.embedding]: t('common:core.dataset.search.mode.embedding'),
+    [DatasetSearchModeEnum.fullTextRecall]: t('common:core.dataset.search.mode.fullTextRecall'),
+    [DatasetSearchModeEnum.mixedRecall]: t('common:core.dataset.search.mode.mixedRecall')
+  }[searchMode];
 
   return (
-    <TableContainer
-      bg={'primary.50'}
+    <FixedTableContainer
+      bg={'myGray.50'}
       borderRadius={'lg'}
       borderWidth={'1px'}
-      borderColor={'primary.1'}
+      borderColor={'myGray.200'}
+      sx={{
+        '&::-webkit-scrollbar': {
+          height: '6px',
+          borderRadius: '4px'
+        },
+        '&::-webkit-scrollbar-thumb': {
+          backgroundColor: 'myGray.250 !important',
+          '&:hover': {
+            backgroundColor: 'myGray.300 !important'
+          }
+        }
+      }}
     >
-      <Table fontSize={'xs'} overflow={'overlay'}>
+      <Table fontSize={'xs'} overflow={'overlay'} sx={{ 'th, td': { px: 3 } }}>
         <Thead>
-          <Tr color={'myGray.600'}>
-            <Th>{t('core.dataset.search.search mode')}</Th>
-            <Th>{t('core.dataset.search.Max Tokens')}</Th>
-            <Th>{t('core.dataset.search.Min Similarity')}</Th>
-            {hasReRankModel && <Th>{t('core.dataset.search.ReRank')}</Th>}
-            <Th>{t('core.module.template.Query extension')}</Th>
-            {hasEmptyResponseMode && <Th>{t('core.dataset.search.Empty result response')}</Th>}
+          <Tr bg={'transparent !important'}>
+            <Th fontSize={'mini'}>{t('common:core.dataset.search.search mode')}</Th>
+            <Th fontSize={'mini'}>{t('common:max_quote_tokens')}</Th>
+            <Th fontSize={'mini'}>{t('common:min_similarity')}</Th>
+            {hasReRankModel && <Th fontSize={'mini'}>{t('common:core.dataset.search.ReRank')}</Th>}
+            <Th fontSize={'mini'}>{t('common:core.module.template.Query extension')}</Th>
+            {showTagFilter && <Th fontSize={'mini'}>{t('workflow:tag_filter')}</Th>}
+            {hasEmptyResponseMode && (
+              <Th fontSize={'mini'}>{t('common:core.dataset.search.Empty result response')}</Th>
+            )}
           </Tr>
         </Thead>
         <Tbody>
           <Tr color={'myGray.800'}>
             <Td pt={0} pb={2}>
-              <Flex alignItems={'center'}>
-                <MyIcon
-                  name={DatasetSearchModeMap[searchMode]?.icon as any}
-                  w={'12px'}
-                  mr={'1px'}
-                />
-                {t(DatasetSearchModeMap[searchMode]?.title)}
-              </Flex>
+              <Flex alignItems={'center'}>{searchModeLabel}</Flex>
             </Td>
             <Td pt={0} pb={2}>
               {limit}
             </Td>
             <Td pt={0} pb={2}>
-              {hasSimilarityMode ? similarity : t('core.dataset.search.Nonsupport')}
+              {hasSimilarityMode ? similarity : t('common:core.dataset.search.Nonsupport')}
             </Td>
             {hasReRankModel && (
               <Td pt={0} pb={2}>
-                {usingReRank ? '✅' : '❌'}
+                {usingReRank
+                  ? t('common:core.app.whisper.Open')
+                  : t('common:core.app.whisper.Close')}
               </Td>
             )}
             <Td pt={0} pb={2}>
-              {usingQueryExtension ? '✅' : '❌'}
+              {usingExtensionQuery ? (
+                <ModelStatusLabel
+                  modelId={queryExtensionModel}
+                  detail={detailState.detail}
+                  loading={detailState.loading}
+                  error={detailState.error}
+                  noTruncate
+                />
+              ) : (
+                t('common:core.app.whisper.Close')
+              )}
             </Td>
-            {hasEmptyResponseMode && <Th>{responseEmptyText !== '' ? '✅' : '❌'}</Th>}
+            {showTagFilter && (
+              <Td pt={0} pb={2}>
+                {isTagFilterEnabled
+                  ? t('common:core.app.whisper.Open')
+                  : t('common:core.app.whisper.Close')}
+              </Td>
+            )}
+            {hasEmptyResponseMode && (
+              <Th>
+                {responseEmptyText !== ''
+                  ? t('common:core.app.whisper.Open')
+                  : t('common:core.app.whisper.Close')}
+              </Th>
+            )}
           </Tr>
         </Tbody>
       </Table>
-    </TableContainer>
+    </FixedTableContainer>
   );
 };
 

@@ -1,53 +1,82 @@
+import { NextAPI } from '@/service/middleware/entry';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
-import { request } from 'http';
 import { FastGPTProUrl } from '@fastgpt/service/common/system/constants';
-import url from 'url';
+import { buildSameOriginUrl } from '@fastgpt/service/common/security/network';
+import { Readable } from 'stream';
+import { finished, pipeline } from 'node:stream/promises';
+import { FASTGPT_PRO_TOKEN_HEADER } from '@fastgpt/global/common/system/constants';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+/** 原样转发 Pro API 的请求和响应流；等待回包结束，避免 NextAPI 抢先生成默认 JSON。 */
+async function handler(req: NextApiRequest, res: NextApiResponse): Promise<void> {
   try {
-    await connectToDatabase();
     const { path = [], ...query } = req.query as any;
     const requestPath = `/api/${path?.join('/')}?${new URLSearchParams(query).toString()}`;
 
     if (!requestPath) {
       throw new Error('url is empty');
     }
+    if (!FastGPTProUrl) {
+      throw new Error(`未配置商业版链接: ${path}`);
+    }
 
-    const parsedUrl = url.parse(FastGPTProUrl);
+    // 防御 protocol-relative URL 覆盖主机(如 path 含空段 → `//169.254...`)
+    const targetUrl = buildSameOriginUrl(requestPath, FastGPTProUrl);
 
-    delete req.headers?.rootkey;
+    const headers: Record<string, string> = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (
+        key === 'rootkey' ||
+        key === FASTGPT_PRO_TOKEN_HEADER ||
+        key === 'host' ||
+        key === 'connection'
+      ) {
+        continue;
+      }
+      if (value) {
+        headers[key] = Array.isArray(value) ? value.join(', ') : value;
+      }
+    }
 
-    const requestResult = request({
-      protocol: parsedUrl.protocol,
-      hostname: parsedUrl.hostname,
-      port: parsedUrl.port,
-      path: requestPath,
+    const request = new Request(targetUrl, {
+      // @ts-ignore
+      duplex: 'half',
       method: req.method,
-      headers: req.headers
+      headers,
+      body: req.method === 'GET' || req.method === 'HEAD' ? null : (req as any)
     });
-    req.pipe(requestResult);
 
-    requestResult.on('response', (response) => {
-      Object.keys(response.headers).forEach((key) => {
-        // @ts-ignore
-        res.setHeader(key, response.headers[key]);
-      });
-      response.statusCode && res.writeHead(response.statusCode);
-      response.pipe(res);
+    const response = await fetch(request);
+
+    response.headers.forEach((value, key) => {
+      const lowerKey = key.toLowerCase();
+      if (lowerKey === 'content-encoding' || lowerKey === 'transfer-encoding') return;
+      res.setHeader(key, value);
     });
-    requestResult.on('error', (e) => {
-      res.send(e);
+
+    res.status(response.status);
+
+    if (response.body) {
+      const nodeStream = Readable.fromWeb(response.body as any);
+      await pipeline(nodeStream, res);
+    } else {
       res.end();
-    });
+      await finished(res, { cleanup: true });
+    }
   } catch (error) {
+    // pipeline 失败可能已发送部分上游响应或销毁连接，交由入口记录错误，不能追加 JSON。
+    if (res.headersSent || res.writableEnded || res.destroyed) {
+      throw error;
+    }
+
     jsonRes(res, {
       code: 500,
       error
     });
   }
 }
+
+export default NextAPI(handler);
 
 export const config = {
   api: {

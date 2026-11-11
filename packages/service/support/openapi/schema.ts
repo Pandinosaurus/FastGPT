@@ -1,6 +1,7 @@
-import { connectionMongo, type Model } from '../../common/mongo';
-const { Schema, model, models } = connectionMongo;
-import type { OpenApiSchema } from '@fastgpt/global/support/openapi/type';
+import { defineIndex, connectionMongo, getMongoModel } from '../../common/mongo';
+const { Schema } = connectionMongo;
+import { type OpenApiSchema } from '@fastgpt/global/support/openapi/type';
+import { ApiKeyTypeEnum } from '@fastgpt/global/support/openapi/constants';
 import {
   TeamCollectionName,
   TeamMemberCollectionName
@@ -23,6 +24,11 @@ const OpenApiSchema = new Schema(
       required: true,
       get: (val: string) => `******${val.substring(val.length - 4)}`
     },
+    type: {
+      type: String,
+      enum: Object.values(ApiKeyTypeEnum),
+      required: true
+    },
     createTime: {
       type: Date,
       default: () => new Date()
@@ -34,9 +40,21 @@ const OpenApiSchema = new Schema(
       type: String,
       required: false
     },
+    appName: {
+      type: String
+    },
+    tagIds: {
+      type: [Schema.Types.ObjectId],
+      default: []
+    },
+    authProxy: {
+      type: Boolean,
+      default: false
+    },
     name: {
       type: String,
-      default: 'Api Key'
+      default: 'Api Key',
+      maxlength: 50
     },
     usagePoints: {
       type: Number,
@@ -57,13 +75,16 @@ const OpenApiSchema = new Schema(
   }
 );
 
-try {
-  OpenApiSchema.index({ teamId: 1 });
-  OpenApiSchema.index({ apiKey: 1 });
-} catch (error) {
-  console.log(error);
-}
+defineIndex(OpenApiSchema, { key: { teamId: 1 } });
+defineIndex(OpenApiSchema, { key: { apiKey: 1 } });
+defineIndex(OpenApiSchema, {
+  key: { teamId: 1, tmbId: 1, tagIds: 1, _id: -1 }
+});
+defineIndex(OpenApiSchema, {
+  key: { teamId: 1, tmbId: 1, appId: 1, _id: -1 }
+});
+defineIndex(OpenApiSchema, { key: { teamId: 1, tmbId: 1, name: 1 } });
+// 应用 Key 列表跨归属成员查询，不能依赖以 tmbId 为前缀的个人索引。
+defineIndex(OpenApiSchema, { key: { teamId: 1, type: 1, appId: 1, _id: -1 } });
 
-export const MongoOpenApi: Model<OpenApiSchema> =
-  models['openapi'] || model('openapi', OpenApiSchema);
-MongoOpenApi.syncIndexes();
+export const MongoOpenApi = getMongoModel<OpenApiSchema>('openapi', OpenApiSchema);

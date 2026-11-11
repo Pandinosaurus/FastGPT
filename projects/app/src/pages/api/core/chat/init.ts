@@ -1,81 +1,154 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
-import { authApp } from '@fastgpt/service/support/permission/auth/app';
-import { getGuideModule } from '@fastgpt/global/core/module/utils';
-import { getChatModelNameListByModules } from '@/service/core/app/module';
-import type { InitChatProps, InitChatResponse } from '@/global/core/chat/api.d';
+import { getChatGenerationStatuses } from '@fastgpt/service/core/chat/generationLease';
+import type { NextApiRequest } from 'next';
+import { NextAPI } from '@/service/middleware/entry';
+import { getAppChatConfig } from '@fastgpt/global/common/app/chat';
+import { getChatModelNameListByModules } from '@/service/core/app/workflow';
+import {
+  InitChatQuerySchema,
+  InitChatResponseSchema,
+  type InitChatResponseType
+} from '@fastgpt/global/openapi/core/chat/controler/api';
 import { MongoChat } from '@fastgpt/service/core/chat/chatSchema';
-import { getChatItems } from '@fastgpt/service/core/chat/controller';
 import { ChatErrEnum } from '@fastgpt/global/common/error/code/chat';
-import { DispatchNodeResponseKeyEnum } from '@fastgpt/global/core/module/runtime/constants';
+import { FlowNodeTypeEnum } from '@fastgpt/global/core/workflow/node/constant';
+import { presignVariablesFileUrls } from '@fastgpt/service/core/chat/utils';
+import { MongoAppRecord } from '@fastgpt/service/core/app/record/schema';
+import { AppErrEnum } from '@fastgpt/global/common/error/code/app';
+import { authCert } from '@fastgpt/service/support/permission/auth/common';
+import { ChatGenerateStatusEnum, ChatSourceTypeEnum } from '@fastgpt/global/core/chat/constants';
+import { isAuxiliaryGenerationSourceType } from '@fastgpt/global/common/chat/source';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
+import { buildChatSourceQuery } from '@fastgpt/service/core/chat/source';
+import { authChatTargetCrud } from '@fastgpt/service/core/chat/auth';
+import { getChatSourceConfig } from '@fastgpt/service/core/chat/config';
+import { AppTypeEnum } from '@fastgpt/global/core/app/constants';
+import { buildChatTargetResponse } from '@fastgpt/global/openapi/core/chat/api';
+import {
+  ChatAgentHelperAppName,
+  ChatAgentHelperAvatar
+} from '@fastgpt/global/core/ai/auxiliaryGeneration/chatAgentHelper';
+import { getDisplayChatTitle } from '@fastgpt/service/core/chat/title';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+/** 统一初始化已授权来源的会话状态；来源差异仅用于解析配置和展示信息。 */
+async function handler(req: NextApiRequest): Promise<InitChatResponseType> {
+  const {
+    customUid,
+    authProxy,
+    sourceType,
+    sourceId: requestedSourceId,
+    chatId
+  } = parseApiInput({
+    req,
+    querySchema: InitChatQuerySchema
+  }).query;
+
   try {
-    await connectToDatabase();
-
-    let { appId, chatId, loadCustomFeedbacks } = req.query as InitChatProps;
-
-    if (!appId) {
-      return jsonRes(res, {
-        code: 501,
-        message: "You don't have an app yet"
-      });
-    }
-
-    // auth app permission
-    const [{ app, tmbId }, chat] = await Promise.all([
-      authApp({
-        req,
-        authToken: true,
-        appId,
-        per: 'r'
-      }),
-      chatId ? MongoChat.findOne({ appId, chatId }) : undefined
-    ]);
-
-    // auth chat permission
-    if (chat && !app.canWrite && String(tmbId) !== String(chat?.tmbId)) {
-      throw new Error(ChatErrEnum.unAuthChat);
-    }
-
-    // get app and history
-    const { history } = await getChatItems({
-      appId,
-      chatId,
-      limit: 30,
-      field: `dataId obj value adminFeedback userBadFeedback userGoodFeedback ${
-        DispatchNodeResponseKeyEnum.nodeResponse
-      } ${loadCustomFeedbacks ? 'customFeedbacks' : ''}`
+    // 资源权限与会话归属只检查一次，复用已加载的 App/Skill。
+    const auth = await authChatTargetCrud({
+      allowMissingChat: true,
+      customUid,
+      authProxy,
+      req,
+      authToken: true,
+      authApiKey: true,
+      sourceType,
+      sourceId: requestedSourceId,
+      chatId
     });
+    const { app, skill, chat, teamId, sourceId } = auth;
+    const generationStatuses = await getChatGenerationStatuses({
+      sourceType,
+      sourceId,
+      chatIds: chatId ? [chatId] : []
+    });
+    const chatGenerateStatus = generationStatuses.get(chatId) ?? ChatGenerateStatusEnum.done;
+    if (chat?.hasBeenRead === false && chatGenerateStatus !== ChatGenerateStatusEnum.generating) {
+      await MongoChat.updateOne(
+        { ...buildChatSourceQuery({ sourceType, sourceId }), ...auth.scope, chatId },
+        { $set: { hasBeenRead: true } }
+      );
+      chat.hasBeenRead = true;
+    }
 
-    jsonRes<InitChatResponse>(res, {
-      data: {
-        chatId,
-        appId,
-        title: chat?.title || '新对话',
-        userAvatar: undefined,
-        variables: chat?.variables || {},
-        history,
-        app: {
-          userGuideModule: getGuideModule(app.modules),
-          chatModels: getChatModelNameListByModules(app.modules),
-          name: app.name,
-          avatar: app.avatar,
-          intro: app.intro
-        }
+    const { nodes, chatConfig } = await getChatSourceConfig({ sourceType, sourceId, app });
+    const appChatConfig =
+      sourceType === ChatSourceTypeEnum.app
+        ? getAppChatConfig({
+            chatConfig,
+            storeVariables: chat?.variableList,
+            storeWelcomeText: chat?.welcomeText,
+            isPublicFetch: false
+          })
+        : chatConfig;
+    const appInfo = (() => {
+      if (sourceType === ChatSourceTypeEnum.chatAgentHelper) {
+        return {
+          name: ChatAgentHelperAppName,
+          avatar: ChatAgentHelperAvatar,
+          intro: '',
+          type: AppTypeEnum.simple
+        };
+      }
+      if (skill) {
+        return {
+          name: skill.name,
+          avatar: skill.avatar ?? '',
+          intro: skill.description ?? '',
+          type: AppTypeEnum.simple
+        };
+      }
+      if (!app) throw ChatErrEnum.unAuthChat;
+      return { name: app.name, avatar: app.avatar ?? '', intro: app.intro ?? '', type: app.type };
+    })();
+    const isAppChat = sourceType === ChatSourceTypeEnum.app;
+    const pluginInputs = isAppChat
+      ? (chat?.pluginInputs ??
+        nodes.find((node) => node.flowNodeType === FlowNodeTypeEnum.pluginInput)?.inputs ??
+        [])
+      : [];
+    const variables = isAppChat
+      ? await presignVariablesFileUrls({
+          variables: chat?.variables,
+          variableConfig: appChatConfig.variables
+        })
+      : {};
+
+    return InitChatResponseSchema.parse({
+      chatId,
+      ...buildChatTargetResponse({ sourceType, sourceId }),
+      title: getDisplayChatTitle({ customTitle: chat?.customTitle, title: chat?.title }),
+      userAvatar: undefined,
+      variables,
+      chatGenerateStatus,
+      hasBeenRead: isAuxiliaryGenerationSourceType(sourceType)
+        ? (chat?.hasBeenRead ?? true)
+        : chat?.hasBeenRead,
+      app: {
+        ...appInfo,
+        chatConfig: appChatConfig,
+        chatModels: isAppChat
+          ? await getChatModelNameListByModules(nodes, { teamId: String(teamId) })
+          : [],
+        pluginInputs
       }
     });
-  } catch (err) {
-    jsonRes(res, {
-      code: 500,
-      error: err
-    });
+  } catch (error) {
+    if (
+      sourceType === ChatSourceTypeEnum.app &&
+      authProxy === undefined &&
+      requestedSourceId &&
+      error === AppErrEnum.unAuthApp
+    ) {
+      const { tmbId } = await authCert({
+        req,
+        authToken: true,
+        authApiKey: true,
+        authAppApiKey: true
+      });
+      await MongoAppRecord.deleteOne({ tmbId, appId: requestedSourceId });
+    }
+    return Promise.reject(error);
   }
 }
 
-export const config = {
-  api: {
-    responseLimit: '10mb'
-  }
-};
+export default NextAPI(handler);

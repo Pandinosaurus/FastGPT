@@ -1,74 +1,385 @@
+import { i18nT } from '../../common/i18n/utils';
+
 /* ------------ dataset -------------- */
 export enum DatasetTypeEnum {
   folder = 'folder',
   dataset = 'dataset',
-  websiteDataset = 'websiteDataset' // depp link
+  websiteDataset = 'websiteDataset', // depp link
+  externalFile = 'externalFile',
+
+  apiDataset = 'apiDataset',
+  feishu = 'feishu',
+  yuque = 'yuque',
+  dingtalk = 'dingtalk'
 }
-export const DatasetTypeMap = {
+
+// @ts-expect-error ignore incomplete api dataset map
+export const ApiDatasetTypeMap: Record<
+  `${DatasetTypeEnum}`,
+  {
+    icon: string;
+    avatar: string;
+    label: any;
+    collectionLabel: string;
+    courseUrl?: string;
+  }
+> = {
+  [DatasetTypeEnum.apiDataset]: {
+    icon: 'core/dataset/externalDatasetOutline',
+    avatar: 'core/dataset/externalDatasetColor',
+    label: i18nT('dataset:api_file'),
+    collectionLabel: i18nT('common:File'),
+    courseUrl: '/guide/dataset/third-party/api_dataset'
+  },
+  [DatasetTypeEnum.feishu]: {
+    icon: 'core/dataset/feishuDatasetOutline',
+    avatar: 'core/dataset/feishuDatasetColor',
+    label: i18nT('dataset:feishu_dataset'),
+    collectionLabel: i18nT('common:File'),
+    courseUrl: '/guide/dataset/third-party/lark_dataset'
+  },
+  [DatasetTypeEnum.yuque]: {
+    icon: 'core/dataset/yuqueDatasetOutline',
+    avatar: 'core/dataset/yuqueDatasetColor',
+    label: i18nT('dataset:yuque_dataset'),
+    collectionLabel: i18nT('common:File'),
+    courseUrl: '/guide/dataset/third-party/yuque_dataset'
+  },
+  [DatasetTypeEnum.dingtalk]: {
+    icon: 'core/dataset/dingtalkDatasetOutline',
+    avatar: 'core/dataset/dingtalkDatasetColor',
+    label: i18nT('dataset:dingtalk_dataset'),
+    collectionLabel: i18nT('common:File'),
+    courseUrl: '/guide/dataset/third-party/dingtalk_dataset'
+  }
+};
+export const DatasetTypeMap: Record<
+  `${DatasetTypeEnum}`,
+  {
+    icon: string;
+    avatar: string;
+    label: any;
+    collectionLabel: string;
+    courseUrl?: string;
+  }
+> = {
+  ...ApiDatasetTypeMap,
   [DatasetTypeEnum.folder]: {
     icon: 'common/folderFill',
-    label: 'core.dataset.Folder Dataset',
-    collectionLabel: 'common.Folder'
+    avatar: 'common/folderFill',
+    label: i18nT('dataset:folder_dataset'),
+    collectionLabel: i18nT('common:Folder')
   },
   [DatasetTypeEnum.dataset]: {
-    icon: 'core/dataset/commonDataset',
-    label: 'core.dataset.Common Dataset',
-    collectionLabel: 'common.File'
+    icon: 'core/dataset/commonDatasetOutline',
+    avatar: 'core/dataset/commonDatasetColor',
+    label: i18nT('dataset:common_dataset'),
+    collectionLabel: i18nT('common:File')
   },
   [DatasetTypeEnum.websiteDataset]: {
-    icon: 'core/dataset/websiteDataset',
-    label: 'core.dataset.Website Dataset',
-    collectionLabel: 'common.Website'
+    icon: 'core/dataset/websiteDatasetOutline',
+    avatar: 'core/dataset/websiteDatasetColor',
+    label: i18nT('dataset:website_dataset'),
+    collectionLabel: i18nT('common:Website'),
+    courseUrl: '/guide/dataset/websync'
+  },
+  [DatasetTypeEnum.externalFile]: {
+    icon: 'core/dataset/externalDatasetOutline',
+    avatar: 'core/dataset/externalDatasetColor',
+    label: i18nT('dataset:external_file'),
+    collectionLabel: i18nT('common:File')
   }
 };
 
 export enum DatasetStatusEnum {
   active = 'active',
-  syncing = 'syncing'
+  syncing = 'syncing',
+  waiting = 'waiting',
+  error = 'error'
 }
 export const DatasetStatusMap = {
   [DatasetStatusEnum.active]: {
-    label: 'core.dataset.status.active'
+    label: i18nT('common:core.dataset.status.active')
   },
   [DatasetStatusEnum.syncing]: {
-    label: 'core.dataset.status.syncing'
+    label: i18nT('common:core.dataset.status.syncing')
+  },
+  [DatasetStatusEnum.waiting]: {
+    label: i18nT('common:core.dataset.status.waiting')
+  },
+  [DatasetStatusEnum.error]: {
+    label: i18nT('dataset:status_error')
   }
 };
 
 /* ------------ collection -------------- */
 export enum DatasetCollectionTypeEnum {
   folder = 'folder',
+  virtual = 'virtual',
+
   file = 'file',
   link = 'link', // one link
-  virtual = 'virtual'
+  externalFile = 'externalFile',
+  apiFile = 'apiFile',
+  images = 'images'
 }
 export const DatasetCollectionTypeMap = {
   [DatasetCollectionTypeEnum.folder]: {
-    name: 'core.dataset.folder'
+    name: i18nT('common:core.dataset.folder')
   },
   [DatasetCollectionTypeEnum.file]: {
-    name: 'core.dataset.file'
+    name: i18nT('common:core.dataset.file')
+  },
+  [DatasetCollectionTypeEnum.externalFile]: {
+    name: i18nT('common:core.dataset.externalFile')
   },
   [DatasetCollectionTypeEnum.link]: {
-    name: 'core.dataset.link'
+    name: i18nT('common:core.dataset.link')
   },
   [DatasetCollectionTypeEnum.virtual]: {
-    name: 'core.dataset.Manual collection'
+    name: i18nT('dataset:empty_collection')
+  },
+  [DatasetCollectionTypeEnum.apiFile]: {
+    name: i18nT('common:core.dataset.apiFile')
+  },
+  [DatasetCollectionTypeEnum.images]: {
+    name: i18nT('dataset:core.dataset.Image collection')
   }
 };
 
 export enum DatasetCollectionSyncResultEnum {
   sameRaw = 'sameRaw',
-  success = 'success'
+  success = 'success',
+  failed = 'failed'
 }
 export const DatasetCollectionSyncResultMap = {
   [DatasetCollectionSyncResultEnum.sameRaw]: {
-    label: 'core.dataset.collection.sync.result.sameRaw'
+    label: i18nT('common:core.dataset.collection.sync.result.sameRaw')
   },
   [DatasetCollectionSyncResultEnum.success]: {
-    label: 'core.dataset.collection.sync.result.success'
+    label: i18nT('common:core.dataset.collection.sync.result.success')
+  },
+  [DatasetCollectionSyncResultEnum.failed]: {
+    label: i18nT('dataset:sync_collection_failed')
   }
 };
+
+/* ------------ collection tags -------------- */
+export enum DatasetCollectionTagTypeEnum {
+  string = 'string',
+  number = 'number',
+  datetime = 'datetime',
+  array = 'array'
+}
+
+export const DatasetCollectionTagTypeMap = {
+  [DatasetCollectionTagTypeEnum.string]: {
+    label: i18nT('dataset:core.dataset.tags.string')
+  },
+  [DatasetCollectionTagTypeEnum.number]: {
+    label: i18nT('dataset:core.dataset.tags.number')
+  },
+  [DatasetCollectionTagTypeEnum.datetime]: {
+    label: i18nT('dataset:core.dataset.tags.date')
+  },
+  [DatasetCollectionTagTypeEnum.array]: {
+    label: i18nT('dataset:core.dataset.tags.array')
+  }
+};
+
+/* ===== Collection Tag Constants ===== */
+/** 旧字符串标签承载记录首次创建时使用的默认名称；身份只由 fromMigration 标识。 */
+export const DEFAULT_TAG = 'default_tag';
+
+/** 迁移承载标签在条件表达式中的内部专用标识符；身份只由 fromMigration: true 标识，不依赖可修改的标签名称。 */
+export const FROM_MIGRATION_CARRIER = '$fromMigration';
+
+/* ------------ collection tag filter operators -------------- */
+export type DatasetTagCompareOp =
+  | '$eq'
+  | '$ne'
+  | '$gt'
+  | '$lt'
+  | '$gte'
+  | '$lte'
+  | '$contains'
+  | '$notContains'
+  | '$startsWith'
+  | '$endsWith'
+  | '$regex'
+  | '$is'
+  | '$isNot'
+  | '$in'
+  | '$notIn'
+  | '$empty'
+  | '$notEmpty';
+
+export type TagFilterOperator = {
+  label: string;
+  value: DatasetTagCompareOp | string;
+  icon?: string;
+  iconFlip?: boolean;
+};
+
+export const emptyValueOperators: TagFilterOperator[] = [
+  { label: i18nT('workflow:tag_filter_op_empty'), value: '$empty' },
+  { label: i18nT('workflow:tag_filter_op_not_empty'), value: '$notEmpty' }
+];
+
+export const tagFilterOperators: Record<`${DatasetCollectionTagTypeEnum}`, TagFilterOperator[]> = {
+  [DatasetCollectionTagTypeEnum.string]: [
+    { label: i18nT('workflow:tag_filter_op_eq'), value: '$eq', icon: 'math/equal' },
+    { label: i18nT('workflow:tag_filter_op_ne'), value: '$ne', icon: 'math/notEqual' },
+    { label: i18nT('workflow:tag_filter_op_contains'), value: '$contains' },
+    { label: i18nT('workflow:tag_filter_op_not_contains'), value: '$notContains' },
+    { label: i18nT('workflow:tag_filter_op_starts_with'), value: '$startsWith' },
+    { label: i18nT('workflow:tag_filter_op_ends_with'), value: '$endsWith' },
+    { label: i18nT('workflow:tag_filter_op_regex'), value: '$regex' },
+    ...emptyValueOperators
+  ],
+  [DatasetCollectionTagTypeEnum.number]: [
+    { label: i18nT('workflow:tag_filter_op_eq'), value: '$eq', icon: 'math/equal' },
+    { label: i18nT('workflow:tag_filter_op_ne'), value: '$ne', icon: 'math/notEqual' },
+    { label: i18nT('workflow:tag_filter_op_gt'), value: '$gt', icon: 'math/greater' },
+    {
+      label: i18nT('workflow:tag_filter_op_lt'),
+      value: '$lt',
+      icon: 'math/greater',
+      iconFlip: true
+    },
+    { label: i18nT('workflow:tag_filter_op_gte'), value: '$gte', icon: 'math/greaterEqual' },
+    {
+      label: i18nT('workflow:tag_filter_op_lte'),
+      value: '$lte',
+      icon: 'math/greaterEqual',
+      iconFlip: true
+    },
+    ...emptyValueOperators
+  ],
+  [DatasetCollectionTagTypeEnum.datetime]: [
+    { label: i18nT('workflow:tag_filter_op_eq'), value: '$eq', icon: 'math/equal' },
+    { label: i18nT('workflow:tag_filter_op_ne'), value: '$ne', icon: 'math/notEqual' },
+    { label: i18nT('workflow:tag_filter_op_after'), value: '$gt' },
+    { label: i18nT('workflow:tag_filter_op_before'), value: '$lt' },
+    ...emptyValueOperators
+  ],
+  [DatasetCollectionTagTypeEnum.array]: [
+    { label: i18nT('workflow:tag_filter_op_eq'), value: '$is', icon: 'math/equal' },
+    { label: i18nT('workflow:tag_filter_op_ne'), value: '$isNot', icon: 'math/notEqual' },
+    { label: i18nT('workflow:tag_filter_op_contains'), value: '$contains' },
+    { label: i18nT('workflow:tag_filter_op_not_contains'), value: '$notContains' },
+    { label: i18nT('workflow:tag_filter_op_in'), value: '$in' },
+    { label: i18nT('workflow:tag_filter_op_not_in'), value: '$notIn' },
+    ...emptyValueOperators
+  ]
+};
+
+export const DatasetTagFilterLogicEnum = {
+  AND: 'AND',
+  OR: 'OR'
+} as const;
+
+export const DatasetTagFilterValueModeEnum = {
+  input: 'input',
+  reference: 'reference'
+} as const;
+
+/** 条件行字段来源：知识库标签或固定文件属性。 */
+export const DatasetTagFilterFieldEnum = {
+  tag: 'tag',
+  createTime: 'createTime',
+  collectionId: 'collectionId'
+} as const;
+
+export const DatasetTagFilterVersionEnum = {
+  legacy: 'legacy',
+  structured: 'structured'
+} as const;
+
+/**
+ * 界面下拉支持配置的标签类型。
+ * string 类型仅由接口/OpenAPI 下发，不进入界面选择器下拉。
+ */
+export const UI_SUPPORTED_TAG_TYPES = [
+  DatasetCollectionTagTypeEnum.number,
+  DatasetCollectionTagTypeEnum.datetime,
+  DatasetCollectionTagTypeEnum.array
+] as const;
+
+export const createTimeOperators: TagFilterOperator[] = [
+  { label: i18nT('workflow:tag_filter_op_gte'), value: '$gte', icon: 'math/greaterEqual' },
+  {
+    label: i18nT('workflow:tag_filter_op_lte'),
+    value: '$lte',
+    icon: 'math/greaterEqual',
+    iconFlip: true
+  }
+];
+
+export const collectionIdOperators: TagFilterOperator[] = [
+  { label: i18nT('workflow:tag_filter_op_in'), value: '$in' }
+];
+
+export enum DatasetCollectionDataProcessModeEnum {
+  chunk = 'chunk',
+  qa = 'qa',
+  imageParse = 'imageParse',
+
+  backup = 'backup',
+  template = 'template',
+
+  auto = 'auto' // abandon
+}
+export const DatasetCollectionDataProcessModeMap = {
+  [DatasetCollectionDataProcessModeEnum.chunk]: {
+    label: i18nT('common:core.dataset.training.Chunk mode'),
+    tooltip: i18nT('common:core.dataset.import.Chunk Split Tip')
+  },
+  [DatasetCollectionDataProcessModeEnum.qa]: {
+    label: i18nT('common:core.dataset.training.QA mode'),
+    tooltip: i18nT('common:core.dataset.import.QA Import Tip')
+  },
+  [DatasetCollectionDataProcessModeEnum.imageParse]: {
+    label: i18nT('dataset:training.Image mode'),
+    tooltip: i18nT('common:core.dataset.import.Chunk Split Tip')
+  },
+  [DatasetCollectionDataProcessModeEnum.auto]: {
+    label: i18nT('common:core.dataset.training.Auto mode'),
+    tooltip: i18nT('common:core.dataset.training.Auto mode Tip')
+  },
+
+  [DatasetCollectionDataProcessModeEnum.backup]: {
+    label: i18nT('dataset:backup_mode'),
+    tooltip: i18nT('dataset:backup_mode')
+  },
+  [DatasetCollectionDataProcessModeEnum.template]: {
+    label: i18nT('dataset:template_mode'),
+    tooltip: i18nT('dataset:template_mode')
+  }
+};
+
+export enum ChunkTriggerConfigTypeEnum {
+  minSize = 'minSize',
+  forceChunk = 'forceChunk',
+  maxSize = 'maxSize'
+}
+export enum ChunkSettingModeEnum {
+  auto = 'auto',
+  custom = 'custom',
+  // 文本→chunk 委托给外部智能分块服务,平台不做本地切分
+  intelligent = 'intelligent'
+}
+
+export enum DataChunkSplitModeEnum {
+  paragraph = 'paragraph',
+  size = 'size',
+  char = 'char'
+}
+export enum ParagraphChunkAIModeEnum {
+  auto = 'auto',
+  force = 'force',
+  forbid = 'forbid'
+}
 
 /* ------------ data -------------- */
 
@@ -77,32 +388,33 @@ export enum ImportDataSourceEnum {
   fileLocal = 'fileLocal',
   fileLink = 'fileLink',
   fileCustom = 'fileCustom',
-  csvTable = 'csvTable'
+  externalFile = 'externalFile',
+  apiDataset = 'apiDataset',
+  reTraining = 'reTraining',
+  imageDataset = 'imageDataset'
 }
 
 export enum TrainingModeEnum {
+  /** @deprecated 仅兼容历史训练记录；新任务使用 index/rebuildIndex/rebuildSynonym，旧任务须迁移，已无消费者。 */
   chunk = 'chunk',
+  parse = 'parse',
+  rebuildIndex = 'rebuildIndex', // 从已存 indexes 重建索引
+  rebuildSynonym = 'rebuildSynonym', // 按最新词表重建派生索引
+  index = 'index', // 为预先创建的数据生成并写回索引
+  qa = 'qa',
   auto = 'auto',
-  qa = 'qa'
+  image = 'image',
+  imageParse = 'imageParse'
 }
 
-export const TrainingTypeMap = {
-  [TrainingModeEnum.chunk]: {
-    label: 'core.dataset.training.Chunk mode',
-    tooltip: 'core.dataset.import.Chunk Split Tip',
-    openSource: true
-  },
-  [TrainingModeEnum.auto]: {
-    label: 'core.dataset.training.Auto mode',
-    tooltip: 'core.dataset.training.Auto mode Tip',
-    openSource: false
-  },
-  [TrainingModeEnum.qa]: {
-    label: 'core.dataset.training.QA mode',
-    tooltip: 'core.dataset.import.QA Import Tip',
-    openSource: true
-  }
-};
+export const DatasetSynonymCollectionName = 'dataset_synonyms';
+export const DatasetSynonymMappingCollectionName = 'dataset_synonym_mappings';
+
+export enum CollectionTrainingStatusEnum {
+  running = 'running',
+  error = 'error',
+  ready = 'ready'
+}
 
 /* ------------ search -------------- */
 export enum DatasetSearchModeEnum {
@@ -114,20 +426,20 @@ export enum DatasetSearchModeEnum {
 export const DatasetSearchModeMap = {
   [DatasetSearchModeEnum.embedding]: {
     icon: 'core/dataset/modeEmbedding',
-    title: 'core.dataset.search.mode.embedding',
-    desc: 'core.dataset.search.mode.embedding desc',
+    title: i18nT('common:core.dataset.search.mode.embedding'),
+    desc: i18nT('common:core.dataset.search.mode.embedding desc'),
     value: DatasetSearchModeEnum.embedding
   },
   [DatasetSearchModeEnum.fullTextRecall]: {
     icon: 'core/dataset/fullTextRecall',
-    title: 'core.dataset.search.mode.fullTextRecall',
-    desc: 'core.dataset.search.mode.fullTextRecall desc',
+    title: i18nT('common:core.dataset.search.mode.fullTextRecall'),
+    desc: i18nT('common:core.dataset.search.mode.fullTextRecall desc'),
     value: DatasetSearchModeEnum.fullTextRecall
   },
   [DatasetSearchModeEnum.mixedRecall]: {
     icon: 'core/dataset/mixedRecall',
-    title: 'core.dataset.search.mode.mixedRecall',
-    desc: 'core.dataset.search.mode.mixedRecall desc',
+    title: i18nT('common:core.dataset.search.mode.mixedRecall'),
+    desc: i18nT('common:core.dataset.search.mode.mixedRecall desc'),
     value: DatasetSearchModeEnum.mixedRecall
   }
 };
@@ -140,26 +452,35 @@ export enum SearchScoreTypeEnum {
 }
 export const SearchScoreTypeMap = {
   [SearchScoreTypeEnum.embedding]: {
-    label: 'core.dataset.search.score.embedding',
-    desc: 'core.dataset.search.score.embedding desc',
+    label: i18nT('common:core.dataset.search.mode.embedding'),
+    desc: i18nT('common:core.dataset.search.score.embedding desc'),
     showScore: true
   },
   [SearchScoreTypeEnum.fullText]: {
-    label: 'core.dataset.search.score.fullText',
-    desc: 'core.dataset.search.score.fullText desc',
+    label: i18nT('common:core.dataset.search.score.fullText'),
+    desc: i18nT('common:core.dataset.search.score.fullText desc'),
     showScore: false
   },
   [SearchScoreTypeEnum.reRank]: {
-    label: 'core.dataset.search.score.reRank',
-    desc: 'core.dataset.search.score.reRank desc',
+    label: i18nT('common:core.dataset.search.score.reRank'),
+    desc: i18nT('common:core.dataset.search.score.reRank desc'),
     showScore: true
   },
   [SearchScoreTypeEnum.rrf]: {
-    label: 'core.dataset.search.score.rrf',
-    desc: 'core.dataset.search.score.rrf desc',
+    label: i18nT('common:core.dataset.search.score.rrf'),
+    desc: i18nT('common:core.dataset.search.score.rrf desc'),
     showScore: false
   }
 };
 
 export const CustomCollectionIcon = 'common/linkBlue';
 export const LinkCollectionIcon = 'common/linkBlue';
+
+/* source prefix */
+export enum DatasetSourceReadTypeEnum {
+  fileLocal = 'fileLocal',
+  link = 'link',
+  externalFile = 'externalFile',
+  apiFile = 'apiFile',
+  reTraining = 'reTraining'
+}

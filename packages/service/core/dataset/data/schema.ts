@@ -1,14 +1,19 @@
-import { connectionMongo, type Model } from '../../../common/mongo';
-const { Schema, model, models } = connectionMongo;
-import { DatasetDataSchemaType } from '@fastgpt/global/core/dataset/type.d';
+import { defineIndex, connectionMongo, getMongoModel } from '../../../common/mongo';
+const { Schema } = connectionMongo;
+import { type DatasetDataSchemaType } from '@fastgpt/global/core/dataset/type';
 import {
   TeamCollectionName,
   TeamMemberCollectionName
 } from '@fastgpt/global/support/user/team/constant';
 import { DatasetCollectionName } from '../schema';
 import { DatasetColCollectionName } from '../collection/schema';
+import {
+  DatasetDataIndexStatusEnum,
+  DatasetDataIndexTypeEnum
+} from '@fastgpt/global/core/dataset/data/constants';
+import { serviceEnv } from '../../../env';
 
-export const DatasetDataCollectionName = 'dataset.datas';
+export const DatasetDataCollectionName = 'dataset_datas';
 
 const DatasetDataSchema = new Schema({
   teamId: {
@@ -31,24 +36,35 @@ const DatasetDataSchema = new Schema({
     ref: DatasetColCollectionName,
     required: true
   },
-  q: {
-    type: String,
-    required: true
-  },
+  q: String,
   a: {
-    type: String,
-    default: ''
+    type: String
   },
-  fullTextToken: {
-    type: String,
-    default: ''
+  imageId: String,
+  imageDescMap: Object,
+  metadata: {
+    type: Object
+  },
+  history: {
+    type: [
+      {
+        q: String,
+        a: String,
+        updateTime: Date
+      }
+    ]
   },
   indexes: {
     type: [
       {
+        // Abandon
         defaultIndex: {
-          type: Boolean,
-          default: false
+          type: Boolean
+        },
+        type: {
+          type: String,
+          enum: Object.values(DatasetDataIndexTypeEnum),
+          default: DatasetDataIndexTypeEnum.custom
         },
         dataId: {
           type: String,
@@ -62,7 +78,6 @@ const DatasetDataSchema = new Schema({
     ],
     default: []
   },
-
   updateTime: {
     type: Date,
     default: () => new Date()
@@ -71,28 +86,59 @@ const DatasetDataSchema = new Schema({
     type: Number,
     default: 0
   },
-  inited: {
-    type: Boolean
-  }
+  indexStatus: {
+    type: String,
+    enum: Object.values(DatasetDataIndexStatusEnum)
+  },
+  indexErrorMsg: String,
+  synonymVersion: Number,
+  synonymRebuildingVersion: Number,
+
+  // Abandon
+  fullTextToken: String,
+  initFullText: Boolean,
+  initJieba: Boolean
 });
 
-try {
-  // list collection and count data; list data
-  DatasetDataSchema.index(
-    { teamId: 1, datasetId: 1, collectionId: 1, chunkIndex: 1, updateTime: -1 },
-    { background: true }
-  );
-  // same data check
-  DatasetDataSchema.index({ teamId: 1, collectionId: 1, q: 1, a: 1 }, { background: true });
-  // full text index
-  DatasetDataSchema.index({ teamId: 1, datasetId: 1, fullTextToken: 'text' }, { background: true });
-  // Recall vectors after data matching
-  DatasetDataSchema.index({ teamId: 1, datasetId: 1, 'indexes.dataId': 1 }, { background: true });
-  DatasetDataSchema.index({ updateTime: 1 }, { background: true });
-} catch (error) {
-  console.log(error);
+// list collection and count data; list data; delete collection(relate data)
+defineIndex(DatasetDataSchema, {
+  key: {
+    teamId: 1,
+    datasetId: 1,
+    collectionId: 1,
+    chunkIndex: 1,
+    updateTime: -1
+  }
+});
+// Recall vectors after data matching
+defineIndex(DatasetDataSchema, {
+  key: { teamId: 1, datasetId: 1, collectionId: 1, 'indexes.dataId': 1 }
+});
+// rebuild data
+defineIndex(DatasetDataSchema, {
+  key: { indexStatus: 1, teamId: 1, datasetId: 1 }
+});
+// 集合列表统计数量和重建状态时直接读取索引，避免读取 q/a、indexes 等完整文档。
+defineIndex(DatasetDataSchema, {
+  key: { teamId: 1, datasetId: 1, collectionId: 1, indexStatus: 1 }
+});
+
+if (serviceEnv.DATASET_SYNONYM_ENABLED) {
+  defineIndex(DatasetDataSchema, {
+    key: { teamId: 1, datasetId: 1, synonymVersion: 1, synonymRebuildingVersion: 1 }
+  });
 }
 
-export const MongoDatasetData: Model<DatasetDataSchemaType> =
-  models[DatasetDataCollectionName] || model(DatasetDataCollectionName, DatasetDataSchema);
-MongoDatasetData.syncIndexes();
+// Cron clear invalid data
+defineIndex(DatasetDataSchema, { key: { updateTime: 1 } });
+
+// FastGPT 旧版重建标记索引已由 indexStatus 索引替代。
+defineIndex(DatasetDataSchema, {
+  key: { rebuilding: 1, teamId: 1, datasetId: 1 },
+  deprecated: true
+});
+
+export const MongoDatasetData = getMongoModel<DatasetDataSchemaType>(
+  DatasetDataCollectionName,
+  DatasetDataSchema
+);

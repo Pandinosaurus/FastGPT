@@ -1,135 +1,68 @@
-import type { AppSimpleEditFormType } from '../app/type';
-import { FlowNodeTypeEnum } from '../module/node/constant';
-import {
-  ModuleOutputKeyEnum,
-  ModuleInputKeyEnum,
-  FlowNodeTemplateTypeEnum
-} from '../module/constants';
-import type { FlowNodeInputItemType } from '../module/node/type.d';
-import { getGuideModule, splitGuideModule } from '../module/utils';
-import { ModuleItemType } from '../module/type.d';
+import type { AppFormEditFormType } from './formEdit/type';
 import { DatasetSearchModeEnum } from '../dataset/constants';
+import { rerankCandidateNumRange } from '../dataset/search/utils';
+import { NodeInputKeyEnum } from '../workflow/constants';
+import { FlowNodeTypeEnum } from '../workflow/node/constant';
+import { type WorkflowTemplateBasicType } from '../workflow/type';
+import { AppTypeEnum } from './constants';
 
-export const getDefaultAppForm = (): AppSimpleEditFormType => {
+const deletedPluginErrorList = new Set([
+  'plugin.team_not_installed',
+  'plugin.team_source_forbidden',
+  'plugin.team_id_required',
+  'plugin.team_source_install_failed',
+  'plugin.version_required'
+]);
+
+/** 判断工具错误是否代表工具已被删除、卸载或当前来源不可用。 */
+export const isToolNotExistError = (error?: unknown) =>
+  typeof error === 'string' && deletedPluginErrorList.has(error);
+
+export const getDefaultAppForm = (): AppFormEditFormType => {
   return {
     aiSettings: {
-      model: 'gpt-3.5-turbo',
-      systemPrompt: '',
-      temperature: 0,
       isResponseAnswerText: true,
-      maxHistories: 6,
-      maxToken: 4000
+      maxHistories: 6
     },
     dataset: {
       datasets: [],
       similarity: 0.4,
-      limit: 1500,
+      limit: 3000,
       searchMode: DatasetSearchModeEnum.embedding,
       usingReRank: false,
-      datasetSearchUsingExtensionQuery: true,
-      datasetSearchExtensionBg: ''
+      rerankWeight: 0.5,
+      rerankCandidateNum: rerankCandidateNumRange.default,
+      datasetSearchUsingExtensionQuery: false,
+      datasetSearchExtensionBg: '',
+      [NodeInputKeyEnum.authTmbId]: false
     },
     selectedTools: [],
-    userGuide: {
-      welcomeText: '',
-      variables: [],
-      questionGuide: false,
-      tts: {
-        type: 'web'
-      }
-    }
+    selectedAgentSkills: [],
+    chatConfig: {}
   };
 };
 
-/* format app modules to edit form */
-export const appModules2Form = ({ modules }: { modules: ModuleItemType[] }) => {
-  const defaultAppForm = getDefaultAppForm();
+export const getAppType = (config?: WorkflowTemplateBasicType | AppFormEditFormType) => {
+  if (!config) return '';
 
-  const findInputValueByKey = (inputs: FlowNodeInputItemType[], key: string) => {
-    return inputs.find((item) => item.key === key)?.value;
-  };
+  if ('aiSettings' in config) {
+    return AppTypeEnum.simple;
+  }
 
-  modules.forEach((module) => {
-    if (
-      module.flowType === FlowNodeTypeEnum.chatNode ||
-      module.flowType === FlowNodeTypeEnum.tools
-    ) {
-      defaultAppForm.aiSettings.model = findInputValueByKey(
-        module.inputs,
-        ModuleInputKeyEnum.aiModel
-      );
-      defaultAppForm.aiSettings.systemPrompt = findInputValueByKey(
-        module.inputs,
-        ModuleInputKeyEnum.aiSystemPrompt
-      );
-      defaultAppForm.aiSettings.temperature = findInputValueByKey(
-        module.inputs,
-        ModuleInputKeyEnum.aiChatTemperature
-      );
-      defaultAppForm.aiSettings.maxToken = findInputValueByKey(
-        module.inputs,
-        ModuleInputKeyEnum.aiChatMaxToken
-      );
-      defaultAppForm.aiSettings.maxHistories = findInputValueByKey(
-        module.inputs,
-        ModuleInputKeyEnum.history
-      );
-    } else if (module.flowType === FlowNodeTypeEnum.datasetSearchNode) {
-      defaultAppForm.dataset.datasets = findInputValueByKey(
-        module.inputs,
-        ModuleInputKeyEnum.datasetSelectList
-      );
-      defaultAppForm.dataset.similarity = findInputValueByKey(
-        module.inputs,
-        ModuleInputKeyEnum.datasetSimilarity
-      );
-      defaultAppForm.dataset.limit = findInputValueByKey(
-        module.inputs,
-        ModuleInputKeyEnum.datasetMaxTokens
-      );
-      defaultAppForm.dataset.searchMode =
-        findInputValueByKey(module.inputs, ModuleInputKeyEnum.datasetSearchMode) ||
-        DatasetSearchModeEnum.embedding;
-      defaultAppForm.dataset.usingReRank = !!findInputValueByKey(
-        module.inputs,
-        ModuleInputKeyEnum.datasetSearchUsingReRank
-      );
-      defaultAppForm.dataset.datasetSearchUsingExtensionQuery = findInputValueByKey(
-        module.inputs,
-        ModuleInputKeyEnum.datasetSearchUsingExtensionQuery
-      );
-      defaultAppForm.dataset.datasetSearchExtensionModel = findInputValueByKey(
-        module.inputs,
-        ModuleInputKeyEnum.datasetSearchExtensionModel
-      );
-      defaultAppForm.dataset.datasetSearchExtensionBg = findInputValueByKey(
-        module.inputs,
-        ModuleInputKeyEnum.datasetSearchExtensionBg
-      );
-    } else if (module.flowType === FlowNodeTypeEnum.userGuide) {
-      const { welcomeText, variableModules, questionGuide, ttsConfig } = splitGuideModule(
-        getGuideModule(modules)
-      );
-      defaultAppForm.userGuide = {
-        welcomeText: welcomeText,
-        variables: variableModules,
-        questionGuide: questionGuide,
-        tts: ttsConfig
-      };
-    } else if (module.flowType === FlowNodeTypeEnum.pluginModule) {
-      defaultAppForm.selectedTools.push({
-        id: module.inputs.find((input) => input.key === ModuleInputKeyEnum.pluginId)?.value || '',
-        name: module.name,
-        avatar: module.avatar,
-        intro: module.intro || '',
-        flowType: module.flowType,
-        showStatus: module.showStatus,
-        inputs: module.inputs,
-        outputs: module.outputs,
-        templateType: FlowNodeTemplateTypeEnum.other
-      });
-    }
-  });
-
-  return defaultAppForm;
+  if (!('nodes' in config) || !Array.isArray(config.nodes)) return '';
+  if (
+    config.nodes.some(
+      (node: { flowNodeType?: string }) => node?.flowNodeType === FlowNodeTypeEnum.workflowStart
+    )
+  ) {
+    return AppTypeEnum.workflow;
+  }
+  if (
+    config.nodes.some(
+      (node: { flowNodeType?: string }) => node?.flowNodeType === FlowNodeTypeEnum.pluginInput
+    )
+  ) {
+    return AppTypeEnum.workflowTool;
+  }
+  return '';
 };

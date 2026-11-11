@@ -1,0 +1,105 @@
+# FastGPT 文档
+
+这是FastGPT的官方文档，采用 fumadoc 框架。
+## 运行项目
+
+要运行文档，首先需要进行环境变量配置，在文档的根目录下创建`.env.local`文件，填写以下环境变量:
+
+```bash
+FASTGPT_HOME_DOMAIN=https://fastgpt.io # 只填写 origin，不携带路径或查询参数
+```
+
+你可以在FastGPT项目根目录下执行以下命令来运行文档。
+
+```bash
+pnpm install
+pnpm dev
+```
+项目会默认跑在`http:localhost:3000`端口
+
+## 书写文档
+
+文档采用`mdx`格式，大体和`md`一致，元数据支持 `title`、`description`、`icon` 等字段，参考以下示例代码：
+
+```bash
+---
+title: FastGPT 文档
+description: FastGPT 官方文档
+icon: menu #icon采用`lucide-react`第三方库。
+---
+
+import { Alert } from '@/components/docs/Alert'; #高亮块组件
+import FastGPTLink from '@/components/docs/linkFastGPT';
+
+<Alert icon="🤖" context="success">
+快速开始体验
+- 海外版：<FastGPTLink campaign="docs_getting_started" content="cloud_entry_io" site="io">{'https://fastgpt.io'}</FastGPTLink>
+- 中国大陆：<FastGPTLink campaign="docs_getting_started" content="cloud_entry_cn" site="cn">{'https://fastgpt.cn'}</FastGPTLink>
+</Alert>
+
+import {Redirect} from '@/components/docs/Redirect' #重定向组件，如果你希望用户点击这个文件跳转到别的文件的话，详情参考 `FAQ`的`Docker 部署问题`文档。
+
+<Redirect to="/docs/self-host/deploy/docker/#faq" />
+
+<Tabs items={['Javascript', 'Rust']}> #tabs组件用法，渲染效果参考`introduction`下`development`的`faq`文档
+  <Tab value="Javascript">Javascript is weird</Tab>
+  <Tab value="Rust">Rust is fast</Tab>
+
+
+import FastGPTLink from '@/components/docs/linkFastGPT'; #FastGPT跳转链接组件，根据域名环境变量和传入的归因参数生成链接
+
+本文档介绍了如何设置开发环境以构建和测试 <FastGPTLink campaign="docs_self_host_dev" content="intro_product_link">FastGPT</FastGPTLink>。
+</Tabs>
+
+```
+
+新增跳转 FastGPT 官网的链接时，请同步登记并复用 [UTM 归因规范](./UTM_ATTRIBUTION.md) 中的 `utm_campaign` 和 `utm_content`。
+
+在书写完文档后，需要在对应的目录下的`meta.json`文件的`pages`字段合适位置添加自己的文件名。例如在`content/docs`(默认这是所有文档的根目录)的`introduction`目录下书写了一个`hello.mdx`文件。则需要去`introduction`目录下的`meta.json`添加以下内容:
+
+```bash
+{
+  "title": "FastGPT Docs",
+  "root": true,
+  "pages": ["[Handshake][联系我们](https://fastgpt.cn/zh/contact?source=docs&utm_source=docs&utm_medium=referral&utm_campaign=docs_navigation&utm_content=business_consultation)","index","guide","development","FAQ","shopping_cart","community","hello"], #"hello"原本没有，此外，这里的顺序就是最后文档的展示顺序，现在"hello"文档将会在`introduction`的最后展示
+  "order": 1
+}
+```
+
+## i18n
+
+在`content/docs`下的所有`.mdx`文件为默认语言文件(当前默认语言中文)，`.en.mdx`文件为`i18n`支持的英文文件，例如，你可以将`hello.mdx`文档翻译后，写一个`hello.en.mdx`,同时，在对应目录的`meta.en.json`的`"pages"`字段写下对应的文件名来支持英文文档。
+
+## 未发布文档
+
+在 MDX 的 frontmatter 中添加 `draft: true`，页面会从路由、导航、搜索、sitemap、静态索引和 `llms.txt` 中排除，本地 dev 同样不展示：
+
+```yaml
+---
+title: 尚未发布的功能
+draft: true
+---
+```
+
+需要同时隐藏中英文内容时，在 `.mdx` 和 `.en.mdx` 中都添加标记。发布时移除标记或改为 `draft: false`，并在 `document/` 下运行 `pnpm initDocToc` 更新中英文目录；`meta.json` 的页面顺序可以保留。
+
+各语言独立控制发布状态。缺少翻译文件时仍可展示已发布的默认语言内容；该语言文件明确标记 `draft: true` 时返回 404，不回退到默认语言，也不影响另一语言的已发布页面。
+
+验收草稿前需要启动独立文档服务，并将测试夹具 `docsBaseUrl` 指向该服务；主站未部署文档路由时的 404 不能作为草稿证据。在仓库根目录可执行以下命令，对真实服务检查双语公开页、教程发布状态、导航、搜索、sitemap、静态索引和 `llms.txt`：
+
+```bash
+pnpm --filter @fastgpt/document build
+pnpm --filter @fastgpt/document exec next start --hostname 127.0.0.1 --port 3005
+# 在另一终端执行；也可通过 DOCS_BASE_URL 指定已有 QA 文档站
+node document/script/check-doc-publication.mjs --base-url http://127.0.0.1:3005
+```
+
+## 特殊配置
+
+### 增加顶层导航栏
+
+1. 在 `FastGPT/document/app/[lang]/docs/layout.tsx` 文件中新增导航。
+
+### 重定向
+
+在`FastGPT/document/components/docs/not-found.tsx`文件中新增重定向规则。

@@ -1,59 +1,145 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { withNextCors } from '@fastgpt/service/common/middle/cors';
-import { connectToDatabase } from '@/service/mongo';
-import { updateData2Dataset } from '@/service/core/dataset/data/controller';
-import { authDatasetData } from '@/service/support/permission/auth/dataset';
+import {
+  assertAppDatasetIndexModelsAvailable,
+  getAssertedDatasetEmbeddingModel
+} from '@fastgpt/service/core/dataset/model';
+import {
+  updateDatasetDataByIndexes,
+  updateDatasetDataSystemIndexes
+} from '@/service/core/dataset/data/data';
+import { NextAPI } from '@/service/middleware/entry';
 import { pushGenerateVectorUsage } from '@/service/support/wallet/usage/push';
-import { UpdateDatasetDataProps } from '@/global/core/dataset/api';
-import { checkDatasetLimit } from '@fastgpt/service/support/permission/teamLimit';
+import { DatasetDataIndexTypeEnum } from '@fastgpt/global/core/dataset/data/constants';
+import {
+  UpdateDatasetDataBodySchema,
+  UpdateDatasetDataResponseSchema,
+  type UpdateDatasetDataResponse
+} from '@fastgpt/global/openapi/core/dataset/data/api';
+import { WritePermissionVal } from '@fastgpt/global/support/permission/constant';
+import { AuditEventEnum } from '@fastgpt/global/support/user/audit/constants';
+import { type ApiRequestProps } from '@fastgpt/next/type';
+import { createDatasetFileS3KeyFilter } from '@fastgpt/service/common/s3/sources/dataset/key';
+import { replaceS3KeysToPreviewUrls } from '@fastgpt/service/common/s3/utils/preview';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
+import { getTeamModelHandle } from '@fastgpt/service/core/ai/model/catalog/service';
+import { getAuthorizedModelIds } from '@fastgpt/service/support/permission/model/auth';
+import { authDatasetData } from '@fastgpt/service/support/permission/dataset/auth';
+import { addAuditLog, getI18nDatasetType } from '@fastgpt/service/support/user/audit/util';
+import { addHours } from 'date-fns';
 
-export default withNextCors(async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
-    const { id, q = '', a, indexes = [] } = req.body as UpdateDatasetDataProps;
+async function handler(req: ApiRequestProps): Promise<UpdateDatasetDataResponse> {
+  const { dataId, q, a, indexes } = parseApiInput({
+    req,
+    bodySchema: UpdateDatasetDataBodySchema
+  }).body;
+  const hasIndexes = Object.hasOwn(req.body, 'indexes');
 
-    // auth data permission
-    const {
-      collection: {
-        datasetId: { vectorModel }
-      },
-      teamId,
-      tmbId
-    } = await authDatasetData({
-      req,
-      authToken: true,
-      authApiKey: true,
-      dataId: id,
-      per: 'w'
-    });
+  // auth data permission
+  const {
+    collection: { name, indexPrefixTitle },
+    teamId,
+    tmbId,
+    isRoot,
+    collection,
+    datasetData
+  } = await authDatasetData({
+    req,
+    authToken: true,
+    authApiKey: true,
+    dataId,
+    per: WritePermissionVal,
+    assertWritable: true
+  });
 
-    // auth team balance
-    await checkDatasetLimit({
-      teamId,
-      insertLen: 1
-    });
-
-    const { tokens } = await updateData2Dataset({
-      dataId: id,
-      q,
-      a,
-      indexes,
-      model: vectorModel
-    });
-
-    pushGenerateVectorUsage({
-      teamId,
+  const dataset = collection.dataset;
+  const modelHandle = await getTeamModelHandle({ teamId });
+  const authorizedIds = await getAuthorizedModelIds({
+    actor: { teamId, tmbId, isRoot },
+    handle: modelHandle
+  });
+  const embeddingModels = await assertAppDatasetIndexModelsAvailable({
+    resources: [{ type: 'dataset', id: String(dataset._id) }],
+    teamId,
+    modelHandle,
+    authorizedIds
+  });
+  const vectorModel = getAssertedDatasetEmbeddingModel(embeddingModels, String(dataset._id));
+  const nextQ = q ?? datasetData.q ?? '';
+  const nextA = a ?? datasetData.a ?? '';
+  const pushUpdateDataAuditLog = () => {
+    addAuditLog({
       tmbId,
-      tokens,
-      model: vectorModel
+      teamId,
+      event: AuditEventEnum.UPDATE_DATA,
+      params: {
+        collectionName: collection.name,
+        datasetName: collection.dataset?.name || '',
+        datasetType: getI18nDatasetType(collection.dataset?.type || '')
+      }
+    });
+  };
+
+  if (hasIndexes) {
+    // 兼容旧 API：调用方显式传 indexes 时仍按完整索引更新。
+    // imageEmbedding 是系统索引，不能被外部 indexes 覆盖，统一由 dataIndex 根据数据内容重建。
+    const manualIndexes = indexes?.filter(
+      (index) => index.type !== DatasetDataIndexTypeEnum.imageEmbedding
+    );
+    const { tokens } = await updateDatasetDataByIndexes({
+      dataId,
+      q: nextQ,
+      a: nextA,
+      imageId: datasetData.imageId,
+      imageIndex: !!collection.imageIndex,
+      indexes: manualIndexes || [],
+      model: vectorModel,
+      indexSize: collection.indexSize,
+      indexPrefix: indexPrefixTitle ? `# ${name}` : undefined
     });
 
-    jsonRes(res);
-  } catch (err) {
-    jsonRes(res, {
-      code: 500,
-      error: err
+    if (tokens > 0) {
+      pushGenerateVectorUsage({
+        teamId,
+        tmbId,
+        inputTokens: tokens,
+        model: vectorModel
+      });
+    }
+  } else {
+    const { tokens } = await updateDatasetDataSystemIndexes({
+      dataId,
+      q: nextQ,
+      a: nextA,
+      imageId: datasetData.imageId,
+      imageIndex: !!collection.imageIndex,
+      model: vectorModel,
+      indexSize: collection.indexSize,
+      indexPrefix: indexPrefixTitle ? `# ${name}` : undefined
     });
+
+    if (tokens > 0) {
+      pushGenerateVectorUsage({
+        teamId,
+        tmbId,
+        inputTokens: tokens,
+        model: vectorModel
+      });
+    }
   }
-});
+
+  pushUpdateDataAuditLog();
+
+  const [responseQ, responseA] = await replaceS3KeysToPreviewUrls(
+    [nextQ, nextA],
+    addHours(new Date(), 1),
+    {
+      filter: createDatasetFileS3KeyFilter(collection.datasetId)
+    }
+  );
+
+  return UpdateDatasetDataResponseSchema.parse({
+    q: responseQ,
+    a: nextA ? responseA : undefined
+  });
+}
+
+export default NextAPI(handler);

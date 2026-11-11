@@ -1,51 +1,66 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
-import { authCert } from '@fastgpt/service/support/permission/auth/common';
-import type { AdminUpdateFeedbackParams } from '@/global/core/chat/api.d';
+import { ChatRoleEnum } from '@fastgpt/global/core/chat/constants';
+import type { ApiRequestProps } from '@fastgpt/next/type';
+import { NextAPI } from '@/service/middleware/entry';
 import { MongoChatItem } from '@fastgpt/service/core/chat/chatItemSchema';
-import { autChatCrud } from '@/service/support/permission/auth/chat';
+import { authChatTargetCrud } from '@fastgpt/service/core/chat/auth';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
+import {
+  AdminUpdateFeedbackBodySchema,
+  AdminUpdateFeedbackResponseSchema,
+  type AdminUpdateFeedbackResponseType
+} from '@fastgpt/global/openapi/core/chat/feedback/api';
+import { buildChatSourceQuery } from '@fastgpt/service/core/chat/source';
 
-/* 初始化我的聊天框，需要身份验证 */
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  try {
-    await connectToDatabase();
-    const { appId, chatId, chatItemId, datasetId, dataId, q, a } =
-      req.body as AdminUpdateFeedbackParams;
+async function handler(req: ApiRequestProps): Promise<AdminUpdateFeedbackResponseType> {
+  const {
+    customUid,
+    authProxy,
+    sourceType,
+    sourceId,
+    chatId,
+    dataId,
+    datasetId,
+    feedbackDataId,
+    q,
+    a,
+    outLinkAuthData
+  } = parseApiInput({
+    req,
+    bodySchema: AdminUpdateFeedbackBodySchema
+  }).body;
 
-    if (!chatItemId || !datasetId || !dataId || !q) {
-      throw new Error('missing parameter');
-    }
+  const authRes = await authChatTargetCrud({
+    customUid,
+    authProxy,
+    req,
+    authToken: true,
+    authApiKey: true,
+    sourceType,
+    sourceId,
+    chatId,
+    outLinkAuthData
+  });
+  const resolvedSourceId = authRes.sourceId;
 
-    await autChatCrud({
-      req,
-      authToken: true,
-      appId,
+  await MongoChatItem.updateOne(
+    {
+      ...buildChatSourceQuery({ sourceType, sourceId: resolvedSourceId }),
       chatId,
-      per: 'r'
-    });
-
-    await MongoChatItem.findOneAndUpdate(
-      {
-        appId,
-        chatId,
-        dataId: chatItemId
-      },
-      {
-        adminFeedback: {
-          datasetId,
-          dataId,
-          q,
-          a
-        }
+      dataId,
+      // 同一轮 Human/AI 共用 dataId，管理反馈只属于 AI 消息。
+      obj: ChatRoleEnum.AI
+    },
+    {
+      adminFeedback: {
+        datasetId,
+        dataId: feedbackDataId,
+        q,
+        a
       }
-    );
+    }
+  );
 
-    jsonRes(res);
-  } catch (err) {
-    jsonRes(res, {
-      code: 500,
-      error: err
-    });
-  }
+  return AdminUpdateFeedbackResponseSchema.parse(undefined);
 }
+
+export default NextAPI(handler);

@@ -1,27 +1,55 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
 import { MongoOpenApi } from '@fastgpt/service/support/openapi/schema';
 import { authOpenApiKeyCrud } from '@fastgpt/service/support/permission/auth/openapi';
+import { CommonErrEnum } from '@fastgpt/global/common/error/code/common';
+import type { ApiRequestProps } from '@fastgpt/next/type';
+import { NextAPI } from '@/service/middleware/entry';
+import { addAuditLog } from '@fastgpt/service/support/user/audit/util';
+import { AuditEventEnum } from '@fastgpt/global/support/user/audit/constants';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
+import {
+  DeleteApiKeyQuerySchema,
+  DeleteApiKeyResponseSchema,
+  type DeleteApiKeyQueryType,
+  type DeleteApiKeyResponseType
+} from '@fastgpt/global/openapi/support/openapi/api';
+import { resolveApiKeyScope } from '@fastgpt/service/support/openapi/utils';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  try {
-    await connectToDatabase();
-    const { id } = req.query as { id: string };
+async function handler(
+  req: ApiRequestProps<Record<string, never>, DeleteApiKeyQueryType>
+): Promise<DeleteApiKeyResponseType> {
+  const { id } = parseApiInput({
+    req,
+    querySchema: DeleteApiKeyQuerySchema
+  }).query;
 
-    if (!id) {
-      throw new Error('缺少参数');
-    }
-
-    await authOpenApiKeyCrud({ req, authToken: true, id, per: 'owner' });
-
-    await MongoOpenApi.findOneAndRemove({ _id: id });
-
-    jsonRes(res);
-  } catch (err) {
-    jsonRes(res, {
-      code: 500,
-      error: err
-    });
+  if (!id) {
+    return Promise.reject(CommonErrEnum.missingParams);
   }
+
+  const { tmbId, teamId, openapi } = await authOpenApiKeyCrud({
+    req,
+    authToken: true,
+    id
+  });
+
+  const scope = resolveApiKeyScope(openapi);
+  (async () => {
+    addAuditLog({
+      tmbId,
+      teamId,
+      event: AuditEventEnum.DELETE_API_KEY,
+      params: {
+        keyName: openapi.name,
+        keyId: String(openapi._id),
+        keyType: scope.type,
+        ...('appId' in scope ? { appId: scope.appId } : {})
+      }
+    });
+  })();
+
+  await MongoOpenApi.deleteOne({ _id: id });
+
+  return DeleteApiKeyResponseSchema.parse(undefined);
 }
+
+export default NextAPI(handler);

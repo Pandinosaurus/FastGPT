@@ -1,135 +1,114 @@
 import { GET, POST, PUT, DELETE } from '@/web/common/api/request';
-import type { ParentTreePathItemType } from '@fastgpt/global/common/parentFolder/type.d';
-import type { DatasetItemType, DatasetListItemType } from '@fastgpt/global/core/dataset/type.d';
 import type {
-  GetDatasetCollectionsProps,
-  GetDatasetDataListProps,
-  UpdateDatasetCollectionParams
-} from '@/global/core/api/datasetReq.d';
+  GetPathProps,
+  ParentTreePathItemType
+} from '@fastgpt/global/common/parentFolder/type';
+import type { DatasetItemType, DatasetSimpleItemType } from '@fastgpt/global/core/dataset/type';
+import type { PostDatasetSyncParams } from '@fastgpt/global/openapi/core/dataset/api';
 import type {
-  CreateDatasetCollectionParams,
-  CsvTableCreateDatasetCollectionParams,
-  DatasetUpdateBody,
-  FileIdCreateDatasetCollectionParams,
-  LinkCreateDatasetCollectionParams,
-  PostWebsiteSyncParams,
-  TextCreateDatasetCollectionParams
-} from '@fastgpt/global/core/dataset/api.d';
+  BatchResourceActionResponse,
+  BatchResourceDeleteBody,
+  BatchResourceMoveBody
+} from '@fastgpt/global/openapi/common/batch/api';
 import type {
-  GetTrainingQueueProps,
-  GetTrainingQueueResponse,
-  PostPreviewFilesChunksProps,
-  PostPreviewFilesChunksResponse,
-  PostPreviewTableChunksResponse,
-  SearchTestProps,
-  SearchTestResponse
-} from '@/global/core/dataset/api.d';
-import type {
-  UpdateDatasetDataProps,
-  CreateDatasetParams,
-  InsertOneDatasetDataProps
-} from '@/global/core/dataset/api.d';
-import type { PushDatasetDataResponse } from '@fastgpt/global/core/dataset/api.d';
-import type { DatasetCollectionItemType } from '@fastgpt/global/core/dataset/type';
-import {
-  DatasetCollectionSyncResultEnum,
-  DatasetTypeEnum
-} from '@fastgpt/global/core/dataset/constants';
-import type { DatasetDataItemType } from '@fastgpt/global/core/dataset/type';
-import type { DatasetCollectionsListItemType } from '@/global/core/dataset/type.d';
-import { PagingData } from '@/types';
+  CreateDatasetBody,
+  CreateDatasetWithFilesBody,
+  CreateDatasetWithFilesResponse,
+  GetDatasetListBody,
+  GetDatasetListResponse,
+  GetDatasetListV2Body,
+  GetDatasetListV2Response,
+  UpdateDatasetBody,
+  CreateDatasetFolderBody,
+  SearchDatasetTestBody,
+  SearchDatasetTestResponse,
+  GetDatasetPermissionResponse,
+  ChangeDatasetOwnerBody,
+  EnableCollectionPermissionBody,
+  EnableCollectionPermissionResponse,
+  DisableCollectionPermissionBody,
+  DisableCollectionPermissionResponse
+} from '@fastgpt/global/openapi/core/dataset/api';
 
 /* ======================== dataset ======================= */
-export const getDatasets = (data: { parentId?: string; type?: `${DatasetTypeEnum}` }) =>
-  GET<DatasetListItemType[]>(`/core/dataset/list`, data);
+/** @deprecated 使用 getDatasetsV2，并按分页协议获取列表。 */
+export const getDatasets = (data: GetDatasetListBody) =>
+  POST<GetDatasetListResponse>(`/core/dataset/list`, data, { maxQuantity: 1 });
+
+export const getDatasetsV2 = (data: GetDatasetListV2Body, cancelToken?: AbortController) =>
+  POST<GetDatasetListV2Response>(`/core/dataset/listV2`, data, {
+    maxQuantity: 1,
+    cancelToken
+  });
 
 /**
- * get type=dataset list
+ * 获取当前筛选条件下的全部知识库，供需要跨页遍历资源的选择器使用。
+ * @deprecated 使用 getDatasetsV2，并按需加载后续页。
  */
-export const getAllDataset = () => GET<DatasetListItemType[]>(`/core/dataset/allDataset`);
+export const getAllDatasets = (data: GetDatasetListBody = {}) => getDatasets(data);
 
-export const getDatasetPaths = (parentId?: string) =>
-  GET<ParentTreePathItemType[]>('/core/dataset/paths', { parentId });
+export const getDatasetsByAppIdAndDatasetIds = (data: { appId: string; datasetIdList: string[] }) =>
+  POST<DatasetSimpleItemType[]>(`/core/dataset/listByAppIdAndDatasetIds`, data);
+
+export const getDatasetPaths = (data: GetPathProps) => {
+  if (!data.sourceId) return Promise.resolve([]);
+  return GET<ParentTreePathItemType[]>('/core/dataset/paths', data);
+};
 
 export const getDatasetById = (id: string) => GET<DatasetItemType>(`/core/dataset/detail?id=${id}`);
 
-export const postCreateDataset = (data: CreateDatasetParams) =>
+export const postCreateDataset = (data: CreateDatasetBody) =>
   POST<string>(`/core/dataset/create`, data);
 
-export const putDatasetById = (data: DatasetUpdateBody) => PUT<void>(`/core/dataset/update`, data);
+export const postCreateDatasetWithFiles = (data: CreateDatasetWithFilesBody) =>
+  POST<CreateDatasetWithFilesResponse>(`/core/dataset/createWithFiles`, data);
+
+export const putDatasetById = (data: UpdateDatasetBody) => PUT<void>(`/core/dataset/update`, data);
+
+export const batchMoveDatasets = (data: BatchResourceMoveBody) =>
+  POST<BatchResourceActionResponse>('/core/dataset/batch/move', data);
+
+export const batchDeleteDatasets = (data: BatchResourceDeleteBody) =>
+  POST<BatchResourceActionResponse>('/core/dataset/batch/delete', data);
 
 export const delDatasetById = (id: string) => DELETE(`/core/dataset/delete?id=${id}`);
 
-export const postWebsiteSync = (data: PostWebsiteSyncParams) =>
-  POST(`/proApi/core/dataset/websiteSync`, data, {
+export const postDatasetSync = (data: PostDatasetSyncParams) =>
+  POST(`/proApi/core/dataset/datasetSync`, data, {
     timeout: 600000
-  }).catch();
+  });
+
+export const postCreateDatasetFolder = (data: CreateDatasetFolderBody) =>
+  POST<void>(`/core/dataset/folder/create`, data);
+
+export const getDatasetPermission = (id?: string) =>
+  GET<GetDatasetPermissionResponse>(`/core/dataset/getPermission`, { id });
+
+export const resumeInheritPer = (datasetId: string) =>
+  PUT(`/core/dataset/resumeInheritPermission`, { datasetId });
+
+export const postChangeOwner = (data: ChangeDatasetOwnerBody) =>
+  POST(`/proApi/core/dataset/changeOwner`, data);
+
+/* =========== collection permission switch ============ */
+/**
+ * 开启知识库的数据集权限：服务端在同一请求内同步物化全部 collection 权限快照，
+ * 物化成功后才置位开关，因此耗时较长且失败时开关保持关闭。
+ */
+export const postEnableCollectionPermission = (data: EnableCollectionPermissionBody) =>
+  POST<EnableCollectionPermissionResponse>(`/core/dataset/enableCollectionPermission`, data, {
+    timeout: 600000
+  });
+
+/**
+ * 关闭知识库的数据集权限：服务端会删除全部 collection 协作者配置并重置为继承态，
+ * 属于不可回退的破坏性操作，调用方必须二次确认。
+ */
+export const postDisableCollectionPermission = (data: DisableCollectionPermissionBody) =>
+  POST<DisableCollectionPermissionResponse>(`/core/dataset/disableCollectionPermission`, data, {
+    timeout: 600000
+  });
 
 /* =========== search test ============ */
-export const postSearchText = (data: SearchTestProps) =>
-  POST<SearchTestResponse>(`/core/dataset/searchTest`, data);
-
-/* ============================= collections ==================================== */
-export const getDatasetCollections = (data: GetDatasetCollectionsProps) =>
-  POST<PagingData<DatasetCollectionsListItemType>>(`/core/dataset/collection/list`, data);
-export const getDatasetCollectionPathById = (parentId: string) =>
-  GET<ParentTreePathItemType[]>(`/core/dataset/collection/paths`, { parentId });
-export const getDatasetCollectionById = (id: string) =>
-  GET<DatasetCollectionItemType>(`/core/dataset/collection/detail`, { id });
-export const postDatasetCollection = (data: CreateDatasetCollectionParams) =>
-  POST<string>(`/core/dataset/collection/create`, data);
-export const postCreateDatasetFileCollection = (data: FileIdCreateDatasetCollectionParams) =>
-  POST<{ collectionId: string }>(`/core/dataset/collection/create/file`, data, { timeout: 120000 });
-export const postCreateDatasetLinkCollection = (data: LinkCreateDatasetCollectionParams) =>
-  POST<{ collectionId: string }>(`/core/dataset/collection/create/link`, data);
-export const postCreateDatasetTextCollection = (data: TextCreateDatasetCollectionParams) =>
-  POST<{ collectionId: string }>(`/core/dataset/collection/create/text`, data);
-export const postCreateDatasetCsvTableCollection = (data: CsvTableCreateDatasetCollectionParams) =>
-  POST<{ collectionId: string }>(`/core/dataset/collection/create/csvTable`, data, {
-    timeout: 120000
-  });
-
-export const putDatasetCollectionById = (data: UpdateDatasetCollectionParams) =>
-  POST(`/core/dataset/collection/update`, data);
-export const delDatasetCollectionById = (params: { id: string }) =>
-  DELETE(`/core/dataset/collection/delete`, params);
-export const postLinkCollectionSync = (collectionId: string) =>
-  POST<`${DatasetCollectionSyncResultEnum}`>(`/core/dataset/collection/sync/link`, {
-    collectionId
-  });
-
-/* =============================== data ==================================== */
-/* get dataset list */
-export const getDatasetDataList = (data: GetDatasetDataListProps) =>
-  POST(`/core/dataset/data/list`, data);
-
-export const getDatasetDataItemById = (id: string) =>
-  GET<DatasetDataItemType>(`/core/dataset/data/detail`, { id });
-
-/**
- * insert one data to dataset (immediately insert)
- */
-export const postInsertData2Dataset = (data: InsertOneDatasetDataProps) =>
-  POST<string>(`/core/dataset/data/insertData`, data);
-
-/**
- * update one datasetData by id
- */
-export const putDatasetDataById = (data: UpdateDatasetDataProps) =>
-  PUT('/core/dataset/data/update', data);
-/**
- * 删除一条知识库数据
- */
-export const delOneDatasetDataById = (id: string) =>
-  DELETE<string>(`/core/dataset/data/delete`, { id });
-
-/* ================ training ==================== */
-/* get length of system training queue */
-export const getTrainingQueueLen = (data: GetTrainingQueueProps) =>
-  GET<GetTrainingQueueResponse>(`/core/dataset/training/getQueueLen`, data);
-export const getPreviewChunks = (data: PostPreviewFilesChunksProps) =>
-  POST<{ q: string; a: string }[]>('/core/dataset/file/getPreviewChunks', data);
-
-/* ================== file ======================== */
-export const getFileViewUrl = (fileId: string) =>
-  GET<string>('/core/dataset/file/getPreviewUrl', { fileId });
+export const postSearchText = (data: SearchDatasetTestBody) =>
+  POST<SearchDatasetTestResponse>(`/core/dataset/searchTest`, data);

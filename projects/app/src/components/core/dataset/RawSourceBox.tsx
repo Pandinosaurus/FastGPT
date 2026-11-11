@@ -1,69 +1,81 @@
+import { getChatAuthTargetInput } from '@/web/core/chat/utils';
 import React, { useMemo } from 'react';
-import { Box, BoxProps, Image } from '@chakra-ui/react';
-import { useToast } from '@fastgpt/web/hooks/useToast';
-import { getErrText } from '@fastgpt/global/common/error/utils';
-import MyTooltip from '@/components/MyTooltip';
+import { Box, type BoxProps } from '@chakra-ui/react';
+import MyTooltip from '@fastgpt/web/components/common/MyTooltip';
 import { useTranslation } from 'next-i18next';
-import { getFileAndOpen } from '@/web/core/dataset/utils';
-import { useSystemStore } from '@/web/common/system/useSystemStore';
-import { getSourceNameIcon } from '@fastgpt/global/core/dataset/utils';
+import { getCollectionSourceAndOpen } from '@/web/core/dataset/hooks/readCollectionSource';
+import { getCollectionIcon } from '@fastgpt/global/core/dataset/utils';
 import MyIcon from '@fastgpt/web/components/common/Icon';
+import type { ReadCollectionSourceBodyType } from '@fastgpt/global/openapi/core/dataset/collection/api';
+import type { DatasetCollectionTypeEnum } from '@fastgpt/global/core/dataset/constants';
 
-type Props = BoxProps & {
-  sourceName?: string;
-  sourceId?: string;
-  canView?: boolean;
-};
+type Props = BoxProps &
+  Omit<ReadCollectionSourceBodyType, 'customUid' | 'authProxy'> & {
+    collectionType?: DatasetCollectionTypeEnum;
+    rawSourceName?: string;
+    rawSourceId?: string;
+    canView?: boolean;
+  };
 
-const RawSourceBox = ({ sourceId, sourceName = '', canView = true, ...props }: Props) => {
+const RawSourceBox = ({
+  rawSourceId,
+  collectionType,
+  rawSourceName = '',
+  canView = true,
+
+  collectionId,
+  appId,
+  skillId,
+  sourceType,
+  chatId,
+  chatItemDataId,
+  outLinkAuthData,
+
+  ...props
+}: Props) => {
   const { t } = useTranslation();
-  const { toast } = useToast();
-  const { setLoading } = useSystemStore();
 
-  const canPreview = useMemo(() => !!sourceId && canView, [canView, sourceId]);
+  const canPreview = !!rawSourceId && canView;
 
-  const icon = useMemo(() => getSourceNameIcon({ sourceId, sourceName }), [sourceId, sourceName]);
+  const icon = useMemo(
+    () => getCollectionIcon({ type: collectionType, sourceId: rawSourceId, name: rawSourceName }),
+    [collectionType, rawSourceId, rawSourceName]
+  );
+  const read = getCollectionSourceAndOpen({
+    collectionId,
+    ...getChatAuthTargetInput({ appId, skillId, sourceType, outLinkAuthData }),
+    chatId,
+    chatItemDataId
+  });
+  const displaySourceName = rawSourceName || t('common:unknow_source');
 
   return (
-    <MyTooltip
-      label={canPreview ? t('file.Click to view file') || '' : ''}
-      shouldWrapChildren={false}
+    <Box
+      color={'myGray.900'}
+      fontWeight={'medium'}
+      display={'inline-flex'}
+      whiteSpace={'nowrap'}
+      {...(canPreview
+        ? {
+            cursor: 'pointer',
+            textDecoration: 'underline',
+            onClick: read
+          }
+        : {})}
+      {...props}
     >
-      <Box
-        color={'myGray.900'}
-        fontWeight={'medium'}
-        display={'inline-flex'}
-        whiteSpace={'nowrap'}
-        {...(canPreview
-          ? {
-              cursor: 'pointer',
-              textDecoration: 'underline',
-              onClick: async () => {
-                setLoading(true);
-                try {
-                  await getFileAndOpen(sourceId as string);
-                } catch (error) {
-                  toast({
-                    title: t(getErrText(error, 'error.fileNotFound')),
-                    status: 'error'
-                  });
-                }
-                setLoading(false);
-              }
-            }
-          : {})}
-        {...props}
-      >
-        <MyIcon name={icon as any} w={['14px', '16px']} mr={2} />
+      <MyIcon name={icon as any} w={['1rem', '1.25rem']} mr={2} flexShrink={0} />
+      <MyTooltip label={displaySourceName} showOnlyWhenOverflow>
         <Box
           maxW={['200px', '300px']}
           className={props.className ?? 'textEllipsis'}
           wordBreak={'break-all'}
+          minW={0}
         >
-          {sourceName || t('common.UnKnow Source')}
+          {displaySourceName}
         </Box>
-      </Box>
-    </MyTooltip>
+      </MyTooltip>
+    </Box>
   );
 };
 

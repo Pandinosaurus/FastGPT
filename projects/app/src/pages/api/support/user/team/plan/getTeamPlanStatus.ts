@@ -1,28 +1,91 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
 import { authCert } from '@fastgpt/service/support/permission/auth/common';
-import { FeTeamPlanStatusType } from '@fastgpt/global/support/wallet/sub/type';
 import { getTeamPlanStatus } from '@fastgpt/service/support/wallet/sub/utils';
+import { getTeamCanHideShareBrand } from '@fastgpt/service/support/wallet/sub/service';
+import { NextAPI } from '@/service/middleware/entry';
+import type { ClientTeamPlanStatusType } from '@fastgpt/global/support/wallet/sub/type';
+import { MongoApp } from '@fastgpt/service/core/app/schema';
+import { AppTypeList } from '@fastgpt/global/core/app/constants';
+import { MongoDataset } from '@fastgpt/service/core/dataset/schema';
+import { DatasetTypeEnum } from '@fastgpt/global/core/dataset/constants';
+import { getVectorCountByTeamId } from '@fastgpt/service/common/vectorDB/controller';
+import { MongoTeamMember } from '@fastgpt/service/support/user/team/teamMemberSchema';
+import { TeamMemberStatusEnum } from '@fastgpt/global/support/user/team/constant';
+import { MongoAppRegistration } from '@fastgpt/service/support/appRegistration/schema';
+import {
+  GetTeamPlanStatusQuerySchema,
+  GetTeamPlanStatusResponseSchema,
+  GetTeamPlanEntitlementsResponseSchema,
+  type GetTeamPlanStatusApiResponse
+} from '@fastgpt/global/openapi/support/user/team/api';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
+async function handler(
+  req: NextApiRequest,
+  _res: NextApiResponse<any>
+): Promise<GetTeamPlanStatusApiResponse> {
+  const { scope } = parseApiInput({ req, querySchema: GetTeamPlanStatusQuerySchema }).query;
 
-    const { teamId } = await authCert({
-      req,
-      authToken: true
-    });
-
-    jsonRes<FeTeamPlanStatusType>(res, {
-      data: await getTeamPlanStatus({
-        teamId
-      })
-    });
-  } catch (err) {
-    jsonRes(res, {
-      code: 500,
-      error: err
+  // 权益模式只读当前团队套餐，资源统计故障不应影响权限判断。
+  if (scope === 'entitlements') {
+    const { teamId } = await authCert({ req, authToken: true, allowAccountCancellation: true });
+    return GetTeamPlanEntitlementsResponseSchema.parse({
+      scope,
+      canHideShareBrand: await getTeamCanHideShareBrand(teamId)
     });
   }
+
+  const planStatusResult: ClientTeamPlanStatusType | undefined = await (async () => {
+    try {
+      const { teamId } = await authCert({
+        req,
+        authToken: true,
+        allowAccountCancellation: true
+      });
+
+      const [
+        planStatus,
+        usedMember,
+        usedAppAmount,
+        usedDatasetSize,
+        usedDatasetIndexSize,
+        usedRegistrationCount
+      ] = await Promise.all([
+        getTeamPlanStatus({
+          teamId
+        }),
+        MongoTeamMember.countDocuments({
+          teamId,
+          status: { $ne: TeamMemberStatusEnum.leave }
+        }),
+        MongoApp.countDocuments({
+          teamId,
+          type: {
+            $in: AppTypeList
+          }
+        }),
+        MongoDataset.countDocuments({
+          teamId,
+          type: { $ne: DatasetTypeEnum.folder }
+        }),
+        getVectorCountByTeamId(teamId),
+        MongoAppRegistration.countDocuments({
+          teamId
+        })
+      ]);
+
+      return {
+        ...planStatus,
+        usedMember,
+        usedAppAmount,
+        usedDatasetSize,
+        usedDatasetIndexSize,
+        usedRegistrationCount
+      };
+    } catch (error) {}
+  })();
+
+  return GetTeamPlanStatusResponseSchema.parse(planStatusResult);
 }
+
+export default NextAPI(handler);

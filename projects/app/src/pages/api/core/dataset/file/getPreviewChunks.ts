@@ -1,80 +1,140 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
-import { BucketNameEnum } from '@fastgpt/global/common/file/constants';
-import { authFile } from '@fastgpt/service/support/permission/auth/file';
-import { PostPreviewFilesChunksProps } from '@/global/core/dataset/api';
-import { readFileContentFromMongo } from '@fastgpt/service/common/file/gridfs/controller';
-import { splitText2Chunks } from '@fastgpt/global/common/string/textSplitter';
-import { ImportDataSourceEnum } from '@fastgpt/global/core/dataset/constants';
-import { parseCsvTable2Chunks } from '@fastgpt/service/core/dataset/training/utils';
+import { NextAPI } from '@/service/middleware/entry';
+import { CommonErrEnum } from '@fastgpt/global/common/error/code/common';
+import { DatasetSourceReadTypeEnum } from '@fastgpt/global/core/dataset/constants';
+import {
+  computedCollectionChunkSettings,
+  getLLMMaxChunkSize,
+  maxPreviewChunkCount
+} from '@fastgpt/global/core/dataset/training/utils';
+import { WritePermissionVal } from '@fastgpt/global/support/permission/constant';
+import type { ApiRequestProps } from '@fastgpt/next/type';
+import {
+  createDatasetFileS3KeyFilter,
+  isAuthorizedDatasetFileS3Key
+} from '@fastgpt/service/common/s3/sources/dataset/key';
+import { getTeamModelHandle } from '@fastgpt/service/core/ai/model/catalog/service';
+import { getDatasetModelReference } from '@fastgpt/service/core/dataset/model';
+import { rawText2Chunks, readDatasetSourceRawText } from '@fastgpt/service/core/dataset/read';
+import { authDatasetFileKey } from '@fastgpt/service/support/permission/auth/file';
+import { authDataset } from '@fastgpt/service/support/permission/dataset/auth';
+import { getDatasetIultmzhFileParseConfig } from '@fastgpt/service/thirdProvider/sangfor/parseConfig';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
+import {
+  GetPreviewChunksBodySchema,
+  GetPreviewChunksResponseSchema,
+  type GetPreviewChunksBody,
+  type GetPreviewChunksResponse
+} from '@fastgpt/global/openapi/core/dataset/file/api';
+import { replaceS3KeysToPreviewUrls } from '@fastgpt/service/common/s3/utils/preview';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
+import { addDays } from 'date-fns';
 
-    const { type, sourceId, chunkSize, customSplitChar, overlapRatio } =
-      req.body as PostPreviewFilesChunksProps;
+async function handler(
+  req: ApiRequestProps<GetPreviewChunksBody>
+): Promise<GetPreviewChunksResponse> {
+  const {
+    type,
+    sourceId,
+    customPdfParse = false,
+    overlapRatio,
+    selector,
+    datasetId,
+    externalFileId,
+    ...chunkSettings
+  } = parseApiInput({ req, bodySchema: GetPreviewChunksBodySchema }).body;
 
-    if (!sourceId) {
-      throw new Error('fileIdList is empty');
-    }
-    if (chunkSize > 30000) {
-      throw new Error('chunkSize is too large, should be less than 30000');
-    }
-
-    const { chunks } = await (async () => {
-      if (type === ImportDataSourceEnum.fileLocal) {
-        const { file, teamId } = await authFile({ req, authToken: true, fileId: sourceId });
-        const fileId = String(file._id);
-
-        const { rawText } = await readFileContentFromMongo({
-          teamId,
-          bucketName: BucketNameEnum.dataset,
-          fileId,
-          csvFormat: true
-        });
-        // split chunks (5 chunk)
-        const sliceRawText = 10 * chunkSize;
-        const { chunks } = splitText2Chunks({
-          text: rawText.slice(0, sliceRawText),
-          chunkLen: chunkSize,
-          overlapRatio,
-          customReg: customSplitChar ? [customSplitChar] : []
-        });
-
-        return {
-          chunks: chunks.map((item) => ({
-            q: item,
-            a: ''
-          }))
-        };
-      }
-      if (type === ImportDataSourceEnum.csvTable) {
-        const { file, teamId } = await authFile({ req, authToken: true, fileId: sourceId });
-        const fileId = String(file._id);
-        const { rawText } = await readFileContentFromMongo({
-          teamId,
-          bucketName: BucketNameEnum.dataset,
-          fileId,
-          csvFormat: false
-        });
-        const { chunks } = parseCsvTable2Chunks(rawText);
-
-        return {
-          chunks: chunks || []
-        };
-      }
-      return { chunks: [] };
-    })();
-
-    jsonRes<{ q: string; a: string }[]>(res, {
-      data: chunks.slice(0, 5)
-    });
-  } catch (error) {
-    jsonRes(res, {
-      code: 500,
-      error
-    });
+  if (!sourceId) {
+    throw new Error('sourceId is empty');
   }
+
+  if (
+    type === DatasetSourceReadTypeEnum.fileLocal &&
+    !isAuthorizedDatasetFileS3Key({ key: sourceId, datasetId })
+  ) {
+    return Promise.reject(CommonErrEnum.unAuthFile);
+  }
+
+  const fileAuthRes =
+    type === DatasetSourceReadTypeEnum.fileLocal
+      ? await authDatasetFileKey({
+          req,
+          authToken: true,
+          authApiKey: true,
+          fileId: sourceId,
+          per: WritePermissionVal
+        })
+      : undefined;
+
+  const { dataset, teamId, tmbId } = await authDataset({
+    req,
+    authApiKey: true,
+    authToken: true,
+    datasetId,
+    per: WritePermissionVal
+  });
+
+  if (fileAuthRes && String(fileAuthRes.tmbId) !== String(tmbId) && !fileAuthRes.isRoot) {
+    return Promise.reject(CommonErrEnum.unAuthFile);
+  }
+  const modelHandle = await getTeamModelHandle({ teamId });
+  const agentModelData = modelHandle.getModelData(getDatasetModelReference(dataset, 'agent'), {
+    type: 'llm'
+  });
+  const formatChunkSettings = computedCollectionChunkSettings({
+    ...chunkSettings,
+    llmModel: agentModelData,
+    vectorModel: modelHandle.getModelData(getDatasetModelReference(dataset, 'embedding'), {
+      type: 'embedding'
+    })
+  });
+
+  const { rawText } = await readDatasetSourceRawText({
+    teamId,
+    tmbId,
+    type,
+    sourceId,
+    selector,
+    externalFileId,
+    customPdfParse,
+    // 解析开关仅对外部解析路径生效;非 customPdfParse 时传 undefined,rawText 缓存沿用旧 key
+    sangforFileParseConfig: customPdfParse ? getDatasetIultmzhFileParseConfig(dataset) : undefined,
+    apiDatasetServer: dataset.apiDatasetServer,
+    datasetId
+  });
+
+  const chunks = await rawText2Chunks({
+    rawText,
+    chunkTriggerType: formatChunkSettings.chunkTriggerType,
+    chunkTriggerMinSize: formatChunkSettings.chunkTriggerMinSize,
+    chunkSize: formatChunkSettings.chunkSize,
+    paragraphChunkDeep: formatChunkSettings.paragraphChunkDeep,
+    paragraphChunkMinSize: formatChunkSettings.paragraphChunkMinSize,
+    maxSize: getLLMMaxChunkSize(agentModelData),
+    overlapRatio,
+    customReg: formatChunkSettings.chunkSplitter ? [formatChunkSettings.chunkSplitter] : [],
+    chunkSettingMode: formatChunkSettings.chunkSettingMode,
+    trainingType: formatChunkSettings.trainingType,
+    maxChunks: maxPreviewChunkCount
+  });
+
+  const previewChunks = chunks.slice(0, 10);
+  const previewTexts = previewChunks.flatMap(({ q, a }) => [q, a]);
+  const previewTextsWithUrls = await replaceS3KeysToPreviewUrls(
+    previewTexts,
+    addDays(new Date(), 1),
+    {
+      filter: createDatasetFileS3KeyFilter(datasetId)
+    }
+  );
+  const chunksWithJWT = previewChunks.map((chunk, index) => ({
+    q: previewTextsWithUrls[index * 2] ?? chunk.q,
+    a: previewTextsWithUrls[index * 2 + 1] ?? chunk.a
+  }));
+
+  return GetPreviewChunksResponseSchema.parse({
+    chunks: chunksWithJWT,
+    total: chunks.length
+  });
 }
+
+export default NextAPI(handler);

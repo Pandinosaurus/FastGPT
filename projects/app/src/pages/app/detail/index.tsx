@@ -1,214 +1,93 @@
-import React, { useEffect, useMemo, useCallback } from 'react';
-import { useRouter } from 'next/router';
-import { Box, Flex, IconButton, useTheme } from '@chakra-ui/react';
+'use client';
+import React, { useEffect } from 'react';
+import { Box } from '@chakra-ui/react';
 import dynamic from 'next/dynamic';
-import { useToast } from '@fastgpt/web/hooks/useToast';
-import { useQuery } from '@tanstack/react-query';
-import { useSystemStore } from '@/web/common/system/useSystemStore';
-
-import Tabs from '@/components/Tabs';
-import SideTabs from '@/components/SideTabs';
-import Avatar from '@/components/Avatar';
-import MyIcon from '@fastgpt/web/components/common/Icon';
-import PageContainer from '@/components/PageContainer';
 import Loading from '@fastgpt/web/components/common/MyLoading';
-import SimpleEdit from './components/SimpleEdit';
-import { serviceSideProps } from '@/web/common/utils/i18n';
-import { useAppStore } from '@/web/core/app/store/useAppStore';
-import Head from 'next/head';
-import { useTranslation } from 'next-i18next';
+import { useRequiredQueryParam } from '@/web/common/hooks/useRequiredQueryParam';
+import NextHead from '@/components/common/NextHead';
+import { useContextSelector } from 'use-context-selector';
+import AppContextProvider, { AppContext } from '@/pageComponents/app/detail/context';
+import { AppTypeEnum } from '@fastgpt/global/core/app/constants';
+import { useChatStore } from '@/web/core/chat/context/useChatStore';
+import { TabEnum } from '@/pageComponents/app/detail/context';
+import { ChatSourceEnum } from '@fastgpt/global/core/chat/constants';
+import { shouldRouteReadOnlyAppToLogs } from '@/pageComponents/app/detail/permissionRouting';
 
-const FlowEdit = dynamic(() => import('./components/FlowEdit'), {
-  loading: () => <Loading />
-});
-const OutLink = dynamic(() => import('./components/OutLink'), {});
-const Logs = dynamic(() => import('./components/Logs'), {});
+const SimpleEdit = dynamic(() => import('@/pageComponents/app/detail/Edit/SimpleApp'));
+const AgentEdit = dynamic(() => import('@/pageComponents/app/detail/Edit/ChatAgent'));
+const Workflow = dynamic(() => import('@/pageComponents/app/detail/Workflow'));
+const Plugin = dynamic(() => import('@/pageComponents/app/detail/Plugin'));
+const MCPTools = dynamic(() => import('@/pageComponents/app/detail/Edit/MCPTools'));
+const HTTPTools = dynamic(() => import('@/pageComponents/app/detail/Edit/HTTPTools'));
 
-enum TabEnum {
-  'simpleEdit' = 'simpleEdit',
-  'adEdit' = 'adEdit',
-  'publish' = 'publish',
-  'logs' = 'logs',
-  'startChat' = 'startChat'
-}
-
-const AppDetail = ({ currentTab }: { currentTab: `${TabEnum}` }) => {
-  const { t } = useTranslation();
-  const router = useRouter();
-  const theme = useTheme();
-  const { feConfigs } = useSystemStore();
-  const { toast } = useToast();
-  const { appId } = router.query as { appId: string };
-  const { appDetail, loadAppDetail, clearAppModules } = useAppStore();
-
-  const setCurrentTab = useCallback(
-    (tab: `${TabEnum}`) => {
-      router.push({
-        query: {
-          ...router.query,
-          currentTab: tab
-        }
-      });
-    },
-    [router]
-  );
-
-  const tabList = useMemo(
-    () => [
-      {
-        label: t('core.app.navbar.Simple mode'),
-        id: TabEnum.simpleEdit,
-        icon: 'common/overviewLight'
-      },
-      ...(feConfigs?.hide_app_flow
-        ? []
-        : [
-            {
-              label: t('core.app.navbar.Flow mode'),
-              id: TabEnum.adEdit,
-              icon: 'core/modules/flowLight'
-            }
-          ]),
-      {
-        label: t('core.app.navbar.Publish app'),
-        id: TabEnum.publish,
-        icon: 'support/outlink/shareLight'
-      },
-      { label: t('app.Chat logs'), id: TabEnum.logs, icon: 'core/app/logsLight' },
-      { label: t('core.Start chat'), id: TabEnum.startChat, icon: 'core/chat/chatLight' }
-    ],
-    [feConfigs?.hide_app_flow, t]
-  );
-
-  const onCloseFlowEdit = useCallback(() => setCurrentTab(TabEnum.simpleEdit), [setCurrentTab]);
+const AppDetail = () => {
+  const { appId: storeAppId, source, setAppId, setSource } = useChatStore();
+  const appId = useContextSelector(AppContext, (e) => e.appId);
+  const appDetail = useContextSelector(AppContext, (e) => e.appDetail);
+  const currentTab = useContextSelector(AppContext, (e) => e.currentTab);
+  const route2Tab = useContextSelector(AppContext, (e) => e.route2Tab);
+  const isCurrentAppLoaded = !!appDetail._id && appDetail._id === appId;
+  const isChatStoreReady = source === ChatSourceEnum.test && storeAppId === appDetail._id;
 
   useEffect(() => {
-    const listen =
-      process.env.NODE_ENV === 'production'
-        ? (e: any) => {
-            e.preventDefault();
-            e.returnValue = t('core.common.tip.leave page');
-          }
-        : () => {};
-    window.addEventListener('beforeunload', listen);
+    setSource(ChatSourceEnum.test);
+    if (isCurrentAppLoaded) {
+      setAppId(appDetail._id);
 
-    return () => {
-      window.removeEventListener('beforeunload', listen);
-      clearAppModules();
-    };
-  }, []);
-
-  useQuery([appId], () => loadAppDetail(appId, true), {
-    onError(err: any) {
-      toast({
-        title: err?.message || t('core.app.error.Get app failed'),
-        status: 'error'
-      });
-      router.replace('/app/list');
-    },
-    onSettled() {
-      router.prefetch(`/chat?appId=${appId}`);
+      if (
+        shouldRouteReadOnlyAppToLogs({
+          hasWritePermission: appDetail.permission.hasWritePer,
+          currentTab
+        })
+      ) {
+        route2Tab(TabEnum.logs);
+      }
     }
-  });
+  }, [
+    appDetail._id,
+    appDetail.permission.hasWritePer,
+    currentTab,
+    isCurrentAppLoaded,
+    route2Tab,
+    setAppId,
+    setSource
+  ]);
 
   return (
     <>
-      <Head>
-        <title>{appDetail.name}</title>
-      </Head>
-      <PageContainer>
-        <Flex flexDirection={['column', 'row']} h={'100%'}>
-          {/* pc tab */}
-          <Box
-            display={['none', 'flex']}
-            flexDirection={'column'}
-            p={4}
-            w={'180px'}
-            borderRight={theme.borders.base}
-          >
-            <Flex mb={4} alignItems={'center'}>
-              <Avatar src={appDetail.avatar} w={'34px'} borderRadius={'md'} />
-              <Box ml={2} fontWeight={'bold'}>
-                {appDetail.name}
-              </Box>
-            </Flex>
-            <SideTabs
-              flex={1}
-              mx={'auto'}
-              mt={2}
-              w={'100%'}
-              list={tabList}
-              activeId={currentTab}
-              onChange={(e: any) => {
-                if (e === 'startChat') {
-                  router.push(`/chat?appId=${appId}`);
-                } else {
-                  setCurrentTab(e);
-                }
-              }}
-            />
-            <Flex
-              alignItems={'center'}
-              cursor={'pointer'}
-              py={2}
-              px={3}
-              borderRadius={'md'}
-              _hover={{ bg: 'myGray.100' }}
-              onClick={() => router.replace('/app/list')}
-            >
-              <IconButton
-                mr={3}
-                icon={<MyIcon name={'common/backFill'} w={'18px'} color={'primary.500'} />}
-                bg={'white'}
-                boxShadow={'1px 1px 9px rgba(0,0,0,0.15)'}
-                size={'smSquare'}
-                borderRadius={'50%'}
-                aria-label={''}
-              />
-              {t('app.My Apps')}
-            </Flex>
-          </Box>
-          {/* phone tab */}
-          <Box display={['block', 'none']} textAlign={'center'} py={3}>
-            <Box className="textlg" fontSize={'xl'} fontWeight={'bold'}>
-              {appDetail.name}
-            </Box>
-            <Tabs
-              mx={'auto'}
-              mt={2}
-              w={'100%'}
-              list={tabList}
-              size={'sm'}
-              activeId={currentTab}
-              onChange={(e: any) => {
-                if (e === 'startChat') {
-                  router.push(`/chat?appId=${appId}`);
-                } else {
-                  setCurrentTab(e);
-                }
-              }}
-            />
-          </Box>
-          <Box flex={'1 0 0'} h={[0, '100%']} overflow={['overlay', '']}>
-            {currentTab === TabEnum.simpleEdit && <SimpleEdit appId={appId} />}
-            {currentTab === TabEnum.adEdit && appDetail && (
-              <FlowEdit app={appDetail} onClose={onCloseFlowEdit} />
-            )}
-            {currentTab === TabEnum.logs && <Logs appId={appId} />}
-            {currentTab === TabEnum.publish && <OutLink appId={appId} />}
-          </Box>
-        </Flex>
-      </PageContainer>
+      <NextHead title={appDetail.name} icon={appDetail.avatar}></NextHead>
+      <Box h={'100%'} position={'relative'} bg={'myGray.25'}>
+        {!isCurrentAppLoaded || !isChatStoreReady ? (
+          <Loading fixed={false} />
+        ) : (
+          <>
+            {appDetail.type === AppTypeEnum.simple && <SimpleEdit key={appDetail._id} />}
+            {appDetail.type === AppTypeEnum.chatAgent && <AgentEdit key={appDetail._id} />}
+            {appDetail.type === AppTypeEnum.workflow && <Workflow key={appDetail._id} />}
+            {appDetail.type === AppTypeEnum.workflowTool && <Plugin key={appDetail._id} />}
+            {appDetail.type === AppTypeEnum.mcpToolSet && <MCPTools key={appDetail._id} />}
+            {appDetail.type === AppTypeEnum.httpToolSet && <HTTPTools key={appDetail._id} />}
+          </>
+        )}
+      </Box>
     </>
   );
 };
 
-export async function getServerSideProps(context: any) {
-  const currentTab = context?.query?.currentTab || TabEnum.simpleEdit;
+const Provider = () => {
+  const appId = useRequiredQueryParam('appId', {
+    fallbackRoute: '/dashboard/agent'
+  });
 
-  return {
-    props: { currentTab, ...(await serviceSideProps(context)) }
-  };
-}
+  if (!appId) {
+    return null;
+  }
 
-export default AppDetail;
+  return (
+    <AppContextProvider>
+      <AppDetail />
+    </AppContextProvider>
+  );
+};
+
+export default Provider;

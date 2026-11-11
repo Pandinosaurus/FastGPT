@@ -1,121 +1,67 @@
-/* 
-    Create one dataset collection
-*/
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
-import type { TextCreateDatasetCollectionParams } from '@fastgpt/global/core/dataset/api.d';
-import { authDataset } from '@fastgpt/service/support/permission/auth/dataset';
-import { createOneCollection } from '@fastgpt/service/core/dataset/collection/controller';
+import { authDatasetCollectionCreate } from '@fastgpt/service/support/permission/dataset/auth';
+import { createCollectionAndInsertData } from '@fastgpt/service/core/dataset/collection/controller';
+import { getDatasetModelAuthContext } from '@fastgpt/service/core/dataset/model';
+import { DatasetCollectionTypeEnum } from '@fastgpt/global/core/dataset/constants';
+import { NextAPI } from '@/service/middleware/entry';
+import { type ApiRequestProps } from '@fastgpt/next/type';
+import { getS3DatasetSource } from '@fastgpt/service/common/s3/sources/dataset';
+import { removeS3TTL } from '@fastgpt/service/common/s3/utils';
 import {
-  TrainingModeEnum,
-  DatasetCollectionTypeEnum
-} from '@fastgpt/global/core/dataset/constants';
-import { splitText2Chunks } from '@fastgpt/global/common/string/textSplitter';
-import { checkDatasetLimit } from '@fastgpt/service/support/permission/teamLimit';
-import { predictDataLimitLength } from '@fastgpt/global/core/dataset/utils';
-import { pushDataListToTrainingQueue } from '@fastgpt/service/core/dataset/training/controller';
-import { hashStr } from '@fastgpt/global/common/string/tools';
-import { createTrainingUsage } from '@fastgpt/service/support/wallet/usage/controller';
-import { UsageSourceEnum } from '@fastgpt/global/support/wallet/usage/constants';
-import { getLLMModel, getVectorModel } from '@fastgpt/service/core/ai/model';
-import { mongoSessionRun } from '@fastgpt/service/common/mongo/sessionRun';
+  CreateTextCollectionBodySchema,
+  type CreateCollectionWithResultResponseType
+} from '@fastgpt/global/openapi/core/dataset/collection/createApi';
+import { checkDatasetIndexLimit } from '@fastgpt/service/support/permission/teamLimit';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
-    const {
-      name,
-      text,
-      trainingType = TrainingModeEnum.chunk,
-      chunkSize = 512,
-      chunkSplitter,
-      qaPrompt,
-      ...body
-    } = req.body as TextCreateDatasetCollectionParams;
+async function handler(req: ApiRequestProps): Promise<CreateCollectionWithResultResponseType> {
+  const { name, text, ...body } = parseApiInput({
+    req,
+    bodySchema: CreateTextCollectionBodySchema
+  }).body;
 
-    const { teamId, tmbId, dataset } = await authDataset({
-      req,
-      authToken: true,
-      authApiKey: true,
-      datasetId: body.datasetId,
-      per: 'w'
-    });
+  const { teamId, tmbId, isRoot, dataset } = await authDatasetCollectionCreate({
+    req,
+    authToken: true,
+    authApiKey: true,
+    datasetId: body.datasetId,
+    parentId: body.parentId
+  });
+  const modelAuthContext = await getDatasetModelAuthContext({
+    dataset,
+    teamId,
+    tmbId,
+    isRoot
+  });
 
-    // 1. split text to chunks
-    const { chunks } = splitText2Chunks({
-      text,
-      chunkLen: chunkSize,
-      overlapRatio: trainingType === TrainingModeEnum.chunk ? 0.2 : 0,
-      customReg: chunkSplitter ? [chunkSplitter] : []
-    });
+  // Check dataset limit
+  await checkDatasetIndexLimit({
+    teamId,
+    insertLen: 1
+  });
 
-    // 2. check dataset limit
-    await checkDatasetLimit({
+  const filename = `${name}.txt`;
+  const s3DatasetSource = getS3DatasetSource();
+  const key = await s3DatasetSource.upload({
+    datasetId: String(dataset._id),
+    buffer: Buffer.from(text),
+    filename,
+    contentType: 'text/plain; charset=UTF-8'
+  });
+
+  const res = await createCollectionAndInsertData({
+    dataset,
+    modelAuthContext,
+    createCollectionParams: {
+      ...body,
       teamId,
-      insertLen: predictDataLimitLength(trainingType, chunks)
-    });
-
-    const createResult = await mongoSessionRun(async (session) => {
-      // 3. create collection
-      const { _id: collectionId } = await createOneCollection({
-        ...body,
-        teamId,
-        tmbId,
-        type: DatasetCollectionTypeEnum.virtual,
-
-        name,
-        trainingType,
-        chunkSize,
-        chunkSplitter,
-        qaPrompt,
-
-        hashRawText: hashStr(text),
-        rawTextLength: text.length,
-        session
-      });
-
-      // 4. create training bill
-      const { billId } = await createTrainingUsage({
-        teamId,
-        tmbId,
-        appName: name,
-        billSource: UsageSourceEnum.training,
-        vectorModel: getVectorModel(dataset.vectorModel)?.name,
-        agentModel: getLLMModel(dataset.agentModel)?.name,
-        session
-      });
-
-      // 5. push chunks to training queue
-      const insertResults = await pushDataListToTrainingQueue({
-        teamId,
-        tmbId,
-        datasetId: dataset._id,
-        collectionId,
-        agentModel: dataset.agentModel,
-        vectorModel: dataset.vectorModel,
-        trainingMode: trainingType,
-        prompt: qaPrompt,
-        billId,
-        data: chunks.map((text, index) => ({
-          q: text,
-          chunkIndex: index
-        })),
-        session
-      });
-
-      return { collectionId, results: insertResults };
-    });
-
-    jsonRes(res, {
-      data: createResult
-    });
-  } catch (err) {
-    jsonRes(res, {
-      code: 500,
-      error: err
-    });
-  }
+      tmbId,
+      type: DatasetCollectionTypeEnum.file,
+      fileId: key,
+      name: filename
+    }
+  });
+  await removeS3TTL({ key, bucketName: 'private' });
+  return res;
 }
 
 export const config = {
@@ -125,3 +71,5 @@ export const config = {
     }
   }
 };
+
+export default NextAPI(handler);

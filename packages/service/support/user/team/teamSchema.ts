@@ -1,6 +1,6 @@
-import { connectionMongo, type Model } from '../../../common/mongo';
-const { Schema, model, models } = connectionMongo;
-import { TeamSchema as TeamType } from '@fastgpt/global/support/user/team/type.d';
+import { defineIndex, connectionMongo, getMongoModel } from '../../../common/mongo';
+const { Schema } = connectionMongo;
+import { type TeamSchema as TeamType } from '@fastgpt/global/support/user/team/type';
 import { userCollectionName } from '../../user/schema';
 import { TeamCollectionName } from '@fastgpt/global/support/user/team/constant';
 
@@ -21,13 +21,7 @@ const TeamSchema = new Schema({
     type: Date,
     default: () => Date.now()
   },
-  balance: {
-    type: Number,
-    default: 0
-  },
-  teamDomain: {
-    type: String
-  },
+  balance: Number,
   limit: {
     lastExportDatasetTime: {
       type: Date
@@ -36,22 +30,35 @@ const TeamSchema = new Schema({
       type: Date
     }
   },
-  lafAccount: {
-    token: {
-      type: String
-    },
-    appid: {
-      type: String
+  openaiAccount: {
+    type: {
+      key: String,
+      baseUrl: String
     }
+  },
+  externalWorkflowVariables: {
+    type: Object,
+    default: {}
+  },
+  notificationAccount: {
+    type: String,
+    required: false
+  },
+  meta: {
+    type: Object
+  },
+  deleteTime: {
+    type: Date
   }
 });
 
-try {
-  TeamSchema.index({ name: 1 });
-  TeamSchema.index({ ownerId: 1 });
-} catch (error) {
-  console.log(error);
-}
+defineIndex(TeamSchema, { key: { name: 1 } });
+defineIndex(TeamSchema, { key: { ownerId: 1 } });
+// Admin team list pagination.
+defineIndex(TeamSchema, { key: { createTime: -1, _id: -1 } });
+defineIndex(TeamSchema, {
+  key: { 'meta.wecom.corpId': 1 },
+  options: { sparse: true, unique: true }
+});
 
-export const MongoTeam: Model<TeamType> =
-  models[TeamCollectionName] || model(TeamCollectionName, TeamSchema);
+export const MongoTeam = getMongoModel<TeamType>(TeamCollectionName, TeamSchema);

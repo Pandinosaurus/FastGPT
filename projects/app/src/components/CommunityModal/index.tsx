@@ -1,23 +1,35 @@
 import React from 'react';
 import { Button, ModalFooter, ModalBody } from '@chakra-ui/react';
 import MyModal from '@fastgpt/web/components/common/MyModal';
-import { useTranslation } from 'next-i18next';
+import { useSafeTranslation } from '@fastgpt/web/hooks/useSafeTranslation';
 import Markdown from '../Markdown';
 import { useSystemStore } from '@/web/common/system/useSystemStore';
+import { useUserStore } from '@/web/support/user/useUserStore';
 
 const CommunityModal = ({ onClose }: { onClose: () => void }) => {
-  const { t } = useTranslation();
+  const { t } = useSafeTranslation();
   const { feConfigs } = useSystemStore();
+  const { userInfo } = useUserStore();
+  const isWecomTeam = !!userInfo?.team.isWecomTeam;
 
   return (
-    <MyModal isOpen={true} onClose={onClose} iconSrc="modal/concat" title={t('home.Community')}>
+    <MyModal
+      isOpen={true}
+      onClose={onClose}
+      iconSrc="modal/concat"
+      title={t('common:system.Concat us')}
+    >
       <ModalBody textAlign={'center'}>
-        <Markdown source={feConfigs?.concatMd || ''} />
+        {isWecomTeam ? (
+          t('common:contact_email', { email: 'archer@fastgpt.io' })
+        ) : (
+          <Markdown source={feConfigs?.concatMd || ''} />
+        )}
       </ModalBody>
 
       <ModalFooter>
         <Button variant={'whiteBase'} onClick={onClose}>
-          关闭
+          {t('common:Close')}
         </Button>
       </ModalFooter>
     </MyModal>

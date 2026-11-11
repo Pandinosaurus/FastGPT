@@ -1,107 +1,368 @@
+import { createWorkflowResourceContext } from '@fastgpt/service/core/workflow/resource/context';
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { connectToDatabase } from '@/service/mongo';
 import { sseErrRes } from '@fastgpt/service/common/response';
-import { SseResponseEventEnum } from '@fastgpt/global/core/module/runtime/constants';
-import { responseWrite } from '@fastgpt/service/common/response';
-import type { ModuleItemType } from '@fastgpt/global/core/module/type.d';
-import { pushChatUsage } from '@/service/support/wallet/usage/push';
+import { SseResponseEventEnum } from '@fastgpt/global/core/workflow/runtime/constants';
 import { UsageSourceEnum } from '@fastgpt/global/support/wallet/usage/constants';
-import type { ChatItemType, ChatItemValueItemType } from '@fastgpt/global/core/chat/type';
-import { authApp } from '@fastgpt/service/support/permission/auth/app';
+import type { AIChatItemType, UserChatItemType } from '@fastgpt/global/core/chat/type';
+import { authApp } from '@fastgpt/service/support/permission/app/auth';
 import { dispatchWorkFlow } from '@fastgpt/service/core/workflow/dispatch';
-import { authCert } from '@fastgpt/service/support/permission/auth/common';
-import { getUserChatInfoAndAuthTeamPoints } from '@/service/support/permission/auth/team';
-import { setEntryEntries } from '@fastgpt/service/core/workflow/dispatch/utils';
-import { chatValue2RuntimePrompt } from '@fastgpt/global/core/chat/adapt';
+import { prepareWorkflowFileQuery } from '@fastgpt/service/core/workflow/utils/fileLimits';
+import { getRunningUserInfoByTmbId } from '@fastgpt/service/support/user/team/utils';
+import { concatHistories, removeEmptyUserInput } from '@fastgpt/global/core/chat/utils';
+import { WritePermissionVal } from '@fastgpt/global/support/permission/constant';
+import { AppTypeEnum } from '@fastgpt/global/core/app/constants';
+import {
+  serverGetWorkflowToolRunUserQuery,
+  updateWorkflowToolInputByVariables
+} from '@fastgpt/service/core/app/tool/workflowTool/utils';
+import { NextAPI } from '@/service/middleware/entry';
+import { GPTMessages2Chats } from '@fastgpt/global/core/chat/adapt';
+import {
+  getLastInteractiveValue,
+  getMaxHistoryLimitFromNodes,
+  getWorkflowEntryNodeIds,
+  storeEdges2RuntimeEdges,
+  rewriteNodeOutputByHistories,
+  storeNodes2RuntimeNodes
+} from '@fastgpt/global/core/workflow/runtime/utils';
+import { workflowSseEvent } from '@fastgpt/global/core/workflow/runtime/sse';
+import { WORKFLOW_MAX_RUN_TIMES } from '@fastgpt/service/core/workflow/constants';
+import { getWorkflowToolInputsFromStoreNodes } from '@fastgpt/global/core/app/tool/workflowTool/utils';
+import { getChatItems } from '@fastgpt/service/core/chat/controller';
+import { MongoChat } from '@fastgpt/service/core/chat/chatSchema';
+import {
+  ChatRoleEnum,
+  ChatSourceEnum,
+  ChatSourceTypeEnum
+} from '@fastgpt/global/core/chat/constants';
+import {
+  failChatRound,
+  finalizeChatRound,
+  updateInteractiveChat
+} from '@fastgpt/service/core/chat/saveChat';
+import { preChatRound, type PreChatRoundResult } from '@fastgpt/service/core/chat/utils/prepare';
+import { getLocale } from '@fastgpt/service/common/middle/i18n';
+import { formatTime2YMDHM } from '@fastgpt/global/common/string/time';
+import { LimitTypeEnum, teamFrequencyLimit } from '@fastgpt/service/common/api/frequencyLimit';
+import { getIpFromRequest } from '@fastgpt/service/common/geo';
+import { pushTrack } from '@fastgpt/service/common/middle/tracks/utils';
+import { getNanoid } from '@fastgpt/global/common/string/tools';
+import { UserError } from '@fastgpt/global/common/error/utils';
+import { ChatTestPropsSchema } from '@fastgpt/global/openapi/core/chat/completion/api';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
+import {
+  createWorkflowStreamResponseContext,
+  type WorkflowStreamResponseContext
+} from '@fastgpt/service/core/workflow/utils/streamResponseContext';
+import { buildChatSourceQuery } from '@fastgpt/service/core/chat/source';
+import { APP_SANDBOX_ENABLED_CHAT_METADATA_KEY } from '@fastgpt/global/core/ai/sandbox/constants';
+import { isAppSandboxEnabledInNodes } from '@fastgpt/global/common/app/workflow';
+import { prepareAppWorkflowResources } from '@fastgpt/service/core/app/resource/service';
 
-export type Props = {
-  history: ChatItemType[];
-  prompt: ChatItemValueItemType[];
-  modules: ModuleItemType[];
-  variables: Record<string, any>;
-  appId: string;
-  appName: string;
-};
+async function handler(req: NextApiRequest, res: NextApiResponse) {
+  let streamResponseContext: WorkflowStreamResponseContext | undefined;
+  const chatTestProps = parseApiInput({ req, bodySchema: ChatTestPropsSchema }).body;
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  res.on('close', () => {
-    res.end();
-  });
-  res.on('error', () => {
-    console.log('error: ', 'request error');
-    res.end();
-  });
+  const {
+    nodes,
+    edges,
+    messages = [],
+    responseChatItemId: responseChatItemIdFromBody,
+    appName,
+    appId,
+    chatConfig,
+    chatId
+  } = chatTestProps;
+  const roundState = {
+    preparedRound: undefined as PreChatRoundResult | undefined,
+    sourceId: undefined as string | undefined,
+    chatId: undefined as string | undefined,
+    responseChatItemId: responseChatItemIdFromBody ?? getNanoid(24)
+  };
+  let { variables = {} } = chatTestProps;
+  const source = ChatSourceEnum.test;
+  const originIp = getIpFromRequest(req);
+  const chatMessages = GPTMessages2Chats({ messages });
+  // console.log(JSON.stringify(chatMessages, null, 2), '====', chatMessages.length);
 
-  let { modules = [], history = [], prompt, variables = {}, appName, appId } = req.body as Props;
   try {
-    await connectToDatabase();
-    if (!history || !modules || !prompt || prompt.length === 0) {
-      throw new Error('Prams Error');
-    }
-    if (!Array.isArray(modules)) {
-      throw new Error('history is not array');
-    }
-
     /* user auth */
-    const [_, { teamId, tmbId }] = await Promise.all([
-      authApp({ req, authToken: true, appId, per: 'r' }),
-      authCert({
-        req,
-        authToken: true
-      })
+    // 测试对话会执行请求体传入的节点定义（包括代码节点），需要写入权限
+    const { app, teamId, tmbId, isRoot } = await authApp({
+      req,
+      authToken: true,
+      appId,
+      per: WritePermissionVal
+    });
+    const resources = await prepareAppWorkflowResources({
+      appId,
+      nodes,
+      chatConfig,
+      teamId,
+      tmbId,
+      isRoot
+    });
+    const resourceContext = createWorkflowResourceContext({ resources, teamId, isRoot });
+
+    // 类型获取
+    const isPlugin = app.type === AppTypeEnum.workflowTool;
+    const isTool = app.type === AppTypeEnum.tool;
+    const pluginFixedTitle = isPlugin ? variables.cTime || formatTime2YMDHM(new Date()) : undefined;
+
+    if (
+      !(await teamFrequencyLimit({
+        teamId,
+        type: LimitTypeEnum.chat,
+        res
+      }))
+    ) {
+      return;
+    }
+    pushTrack.teamChatQPM({ teamId });
+
+    // 获取用户问题
+    const userQuestion: UserChatItemType = await (async () => {
+      if (isPlugin) {
+        return serverGetWorkflowToolRunUserQuery({
+          pluginInputs: getWorkflowToolInputsFromStoreNodes(nodes),
+          variables,
+          files: variables.files
+        });
+      }
+      if (isTool) {
+        return {
+          obj: ChatRoleEnum.Human,
+          value: [
+            {
+              text: { content: 'tool test' }
+            }
+          ]
+        };
+      }
+
+      const latestHumanChat = chatMessages.pop() as UserChatItemType;
+      if (!latestHumanChat) {
+        throw new UserError('User question is empty');
+      }
+      return latestHumanChat;
+    })();
+
+    // 获取历史记录
+    const limit = getMaxHistoryLimitFromNodes(nodes);
+    const chatSource = {
+      sourceType: ChatSourceTypeEnum.app,
+      sourceId: String(app._id)
+    };
+    const [{ histories }, chatDetail] = await Promise.all([
+      getChatItems({
+        ...chatSource,
+        chatId,
+        offset: 0,
+        limit,
+        field: `obj value memories`
+      }),
+      MongoChat.findOne(
+        {
+          ...buildChatSourceQuery({
+            sourceType: ChatSourceTypeEnum.app,
+            sourceId: String(app._id)
+          }),
+          chatId
+        },
+        'source variableList variables'
+      )
+      // auth balance
     ]);
 
-    // auth balance
-    const { user } = await getUserChatInfoAndAuthTeamPoints(tmbId);
+    // 把旧的历史变量值写入
+    if (chatDetail?.variables) {
+      variables = {
+        ...chatDetail.variables,
+        ...variables
+      };
+    }
 
-    const { text, files } = chatValue2RuntimePrompt(prompt);
+    const newHistories = concatHistories(histories, chatMessages);
+    const interactive = getLastInteractiveValue(newHistories);
 
-    /* start process */
-    const { flowResponses, flowUsages } = await dispatchWorkFlow({
+    // Get runtimeNodes
+    let runtimeNodes = storeNodes2RuntimeNodes(nodes, getWorkflowEntryNodeIds(nodes, interactive));
+    if (isPlugin) {
+      runtimeNodes = updateWorkflowToolInputByVariables(runtimeNodes, variables);
+      variables = {};
+    }
+    runtimeNodes = rewriteNodeOutputByHistories(runtimeNodes, interactive);
+
+    const {
+      query: workflowQuery,
+      maxFileAmount,
+      maxBytesPerFile
+    } = await prepareWorkflowFileQuery({
+      teamId: String(teamId),
+      chatConfig,
+      query: userQuestion.value
+    });
+    const workflowUserQuestion: UserChatItemType = {
+      ...userQuestion,
+      value: workflowQuery
+    };
+
+    const preparedRound = await preChatRound({
+      ...chatSource,
+      chatId,
+      teamId: String(teamId),
+      tmbId: String(tmbId),
+      source,
+      sourceName: appName || '',
+      userContent: workflowUserQuestion,
+      responseChatItemId: roundState.responseChatItemId,
+      interactive,
+      fixedTitle: pluginFixedTitle,
+      locale: getLocale(req)
+    });
+
+    const runningChatId = preparedRound.chatId;
+    const runningSourceId = String(app._id);
+    const responseChatItemId = preparedRound.responseChatItemId;
+    roundState.preparedRound = preparedRound;
+    roundState.sourceId = runningSourceId;
+    roundState.chatId = runningChatId;
+    roundState.responseChatItemId = responseChatItemId;
+
+    streamResponseContext = await createWorkflowStreamResponseContext({
+      req,
       res,
-      mode: 'test',
-      teamId,
-      tmbId,
-      user,
-      appId,
-      modules: setEntryEntries(modules),
-      variables,
-      inputFiles: files,
-      histories: history,
-      startParams: {
-        userChatInput: text
-      },
       stream: true,
       detail: true,
-      maxRunTimes: 200
+      teamId: String(teamId),
+      sourceType: ChatSourceTypeEnum.app,
+      sourceId: runningSourceId,
+      chatId: runningChatId,
+      responseId: runningChatId,
+      showNodeStatus: true
     });
 
-    responseWrite({
+    /* start process */
+    const {
+      assistantResponses,
+      system_memories,
+      newVariables,
+      durationSeconds,
+      customFeedbacks,
+      workflowRuntimeSummary
+    } = await dispatchWorkFlow({
+      apiVersion: 'v2',
       res,
-      event: SseResponseEventEnum.answer,
-      data: '[DONE]'
-    });
-    responseWrite({
-      res,
-      event: SseResponseEventEnum.flowResponses,
-      data: JSON.stringify(flowResponses)
-    });
-    res.end();
+      lang: getLocale(req),
+      requestOrigin: req.headers.origin,
+      mode: 'test',
+      usageSource: UsageSourceEnum.fastgpt,
 
-    pushChatUsage({
-      appName,
-      appId,
+      uid: tmbId,
+
+      runningAppInfo: {
+        sourceType: ChatSourceTypeEnum.app,
+        sourceId: runningSourceId,
+        name: appName,
+        teamId: app.teamId,
+        tmbId: app.tmbId
+      },
+      runningUserInfo: await getRunningUserInfoByTmbId(tmbId),
+
+      chatId: runningChatId,
+      responseChatItemId,
+      runtimeNodes,
+      runtimeEdges: storeEdges2RuntimeEdges(edges, interactive),
+      variables,
+      query: removeEmptyUserInput(workflowQuery),
+      maxFileAmount,
+      maxBytesPerFile,
+      lastInteractive: interactive,
+      chatConfig,
+      histories: newHistories,
+      stream: true,
+      maxRunTimes: WORKFLOW_MAX_RUN_TIMES,
+      workflowStreamResponse: streamResponseContext.responseWrite,
+      responseDetail: true,
+      showSkillReferences: true,
+      nodeResponseWriteConfig: {
+        persistToDb: preparedRound.shouldPersistChatRound,
+        retainInMemory: false
+      },
+      resourceContext
+    });
+
+    streamResponseContext.responseWrite(workflowSseEvent.answerStop());
+    streamResponseContext.responseWrite(workflowSseEvent.done(SseResponseEventEnum.answer));
+
+    const aiResponse: AIChatItemType & { dataId?: string } = {
+      dataId: responseChatItemId,
+      obj: ChatRoleEnum.AI,
+      value: assistantResponses,
+      memories: system_memories,
+      customFeedbacks
+    };
+    const params = {
+      ...chatSource,
+      chatId: runningChatId,
       teamId,
-      tmbId,
-      source: UsageSourceEnum.fastgpt,
-      flowUsages
-    });
+      tmbId: tmbId,
+      nodes,
+      appChatConfig: chatConfig,
+      variables: newVariables,
+      source,
+      sourceName: appName || '',
+      userContent: workflowUserQuestion,
+      aiContent: aiResponse,
+      durationSeconds,
+      metadata: {
+        originIp,
+        // 本轮根节点配置与会话累计启用事实分开保存，子流程成功状态由 summary 承担。
+        [APP_SANDBOX_ENABLED_CHAT_METADATA_KEY]: isAppSandboxEnabledInNodes(nodes)
+      },
+      workflowRuntimeSummary
+    };
+
+    if (interactive) {
+      await updateInteractiveChat({
+        interactive,
+        shouldFinalizePreparedRound: preparedRound.shouldFinalizePreparedRound,
+        ...params
+      });
+    } else if (preparedRound.shouldFinalizePreparedRound) {
+      await finalizeChatRound(params);
+    }
   } catch (err: any) {
+    const { preparedRound } = roundState;
+    if (preparedRound?.shouldPersistChatRound && roundState.sourceId && roundState.chatId) {
+      if (preparedRound.shouldFinalizePreparedRound) {
+        await failChatRound({
+          sourceType: ChatSourceTypeEnum.app,
+          sourceId: roundState.sourceId,
+          chatId: roundState.chatId,
+          responseChatItemId: roundState.responseChatItemId,
+          error: err
+        });
+      }
+    }
     res.status(500);
-    sseErrRes(res, err);
-    res.end();
+    if (streamResponseContext) {
+      streamResponseContext.writeStreamError(err);
+    } else {
+      sseErrRes(res, err);
+    }
+  } finally {
+    try {
+      // 错误状态写入再次失败时，也要等待续流缓存收尾后再关闭响应。
+      await streamResponseContext?.flushResume();
+      res.end();
+    } finally {
+      await roundState.preparedRound?.releaseGenerationLease?.();
+    }
   }
 }
+
+export default NextAPI(handler);
 
 export const config = {
   api: {

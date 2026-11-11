@@ -1,49 +1,450 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
-import type { CreateAppParams } from '@fastgpt/global/core/app/api.d';
-import { AppTypeEnum } from '@fastgpt/global/core/app/constants';
+import { NextAPI } from '@/service/middleware/entry';
+import type { ParentIdType } from '@fastgpt/global/common/parentFolder/type';
+import { parseParentIdInMongo } from '@fastgpt/global/common/parentFolder/utils';
+import { AppFolderTypeList, AppTypeEnum, ToolTypeList } from '@fastgpt/global/core/app/constants';
+import type { AppResourcesType, AppSchemaType } from '@fastgpt/global/core/app/type';
+import type { AppVersionSchemaType } from '@fastgpt/global/core/app/version/type';
+import { formatModels } from '@fastgpt/global/common/workflow/model';
+import {
+  CreateAppRequestBodySchema,
+  CreateAppResponseSchema,
+  type CreateAppBodyType
+} from '@fastgpt/global/openapi/core/app/common/api';
+import {
+  PerResourceTypeEnum,
+  WritePermissionVal
+} from '@fastgpt/global/support/permission/constant';
+import { TeamAppCreatePermissionVal } from '@fastgpt/global/support/permission/user/constant';
+import { AuditEventEnum } from '@fastgpt/global/support/user/audit/constants';
+import { type ApiRequestProps } from '@fastgpt/next/type';
+import { copyAvatarImage } from '@fastgpt/service/common/file/image/controller';
+import { pushTrack } from '@fastgpt/service/common/middle/tracks/utils';
+import { type ClientSession } from '@fastgpt/service/common/mongo';
+import { mongoSessionRun } from '@fastgpt/service/common/mongo/sessionRun';
+import { getS3AvatarSource } from '@fastgpt/service/common/s3/sources/avatar';
+import { isS3ObjectKey } from '@fastgpt/service/common/s3/utils';
+import { getTeamModelHandle } from '@fastgpt/service/core/ai/model/catalog/service';
+import {
+  beforeUpdateAppFormat,
+  updateParentFoldersUpdateTime
+} from '@fastgpt/service/core/app/controller';
+import { extractAppResources } from '@fastgpt/service/core/app/resource/utils';
 import { MongoApp } from '@fastgpt/service/core/app/schema';
-import { authUserNotVisitor } from '@fastgpt/service/support/permission/auth/user';
-import { checkTeamAppLimit } from '@fastgpt/service/support/permission/teamLimit';
+import { isPluginSystemTemplate } from '@fastgpt/service/core/app/templates/register';
+import { MongoAppTemplate } from '@fastgpt/service/core/app/templates/templateSchema';
+import { MongoAppVersion } from '@fastgpt/service/core/app/version/schema';
+import { normalizeAppWorkflow } from '@fastgpt/service/core/app/version/controller';
+import { authApp } from '@fastgpt/service/support/permission/app/auth';
+import { filterAuthorizedAppResources } from '@fastgpt/service/support/permission/app/resource';
+import { createResourceDefaultCollaborators } from '@fastgpt/service/support/permission/controller';
+import { getAuthorizedModelIds } from '@fastgpt/service/support/permission/model/auth';
+import { checkTeamAppTypeLimit } from '@fastgpt/service/support/permission/teamLimit';
+import { authUserPer } from '@fastgpt/service/support/permission/user/auth';
+import { addAuditLog, getI18nAppType } from '@fastgpt/service/support/user/audit/util';
+import { MongoTeamMember } from '@fastgpt/service/support/user/team/teamMemberSchema';
+import { getFolderAncestorIdsFromParentId } from '@fastgpt/service/common/parentFolder/ancestorIds';
+import { getAppFolderTree, validateParentFolderType } from '@fastgpt/service/core/app/folderTree';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
-    const {
-      name = 'APP',
-      avatar,
-      type = AppTypeEnum.advanced,
-      modules
-    } = req.body as CreateAppParams;
+import { checkCreateResourceParent } from '@fastgpt/service/common/parentFolder/depth';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
 
-    if (!name || !Array.isArray(modules)) {
-      throw new Error('缺少参数');
+async function handler(req: ApiRequestProps<CreateAppBodyType>) {
+  const { body } = parseApiInput({
+    req,
+    bodySchema: CreateAppRequestBodySchema
+  });
+  const {
+    parentId,
+    name,
+    avatar,
+    intro,
+    type,
+    nodes,
+    edges,
+    chatConfig,
+    templateId,
+    utmParams,
+    inheritPermission
+  } = body;
+
+  // 凭证校验
+  const { teamId, tmbId, isRoot } = parentId
+    ? await authApp({
+        req,
+        appId: parentId,
+        authToken: true,
+        authApiKey: true,
+        per: WritePermissionVal
+      })
+    : await authUserPer({
+        req,
+        authToken: true,
+        authApiKey: true,
+        per: TeamAppCreatePermissionVal
+      });
+
+  const tmb = await MongoTeamMember.findById({ _id: tmbId }, 'userId')
+    .populate<{
+      user: { username: string };
+    }>('user', 'username')
+    .lean();
+
+  // 创建app
+  const appId = await onCreateApp({
+    parentId,
+    name,
+    avatar: avatar ?? undefined,
+    intro: intro ?? undefined,
+    type,
+    nodes,
+    edges,
+    chatConfig,
+    teamId,
+    tmbId,
+    userAvatar: tmb?.avatar,
+    username: tmb?.user?.username,
+    templateId,
+    inheritPermission,
+    isRoot
+  });
+
+  pushTrack.createApp({
+    type,
+    teamId,
+    tmbId,
+    appId,
+    ...utmParams
+  });
+
+  return CreateAppResponseSchema.parse(appId);
+}
+
+export default NextAPI(handler);
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: '5mb'
+    }
+  }
+};
+
+/**
+ * 将创建、复制或转换传入的工作流统一迁移为当前 canonical 结构，
+ * 按应用类型保留源工具集 App 的完整根配置，再按团队模型目录与操作人可用模型完成 fallback 及敏感字段处理。
+ */
+const formatAppWorkflowForSave = async ({
+  nodes,
+  edges,
+  chatConfig,
+  teamId,
+  tmbId,
+  isRoot,
+  appType
+}: {
+  appType?: AppTypeEnum;
+  nodes?: unknown[];
+  edges?: AppVersionSchemaType['edges'];
+  chatConfig?: AppVersionSchemaType['chatConfig'];
+  teamId: string;
+  tmbId: string;
+  isRoot?: boolean;
+}) => {
+  const workflow = normalizeAppWorkflow(
+    {
+      nodes: nodes ?? [],
+      edges: edges ?? [],
+      chatConfig
+    },
+    appType
+  );
+  const modelHandle = await getTeamModelHandle({ teamId });
+  const authorizedIds = await getAuthorizedModelIds({
+    actor: { teamId, tmbId, isRoot: Boolean(isRoot) },
+    handle: modelHandle
+  });
+  formatModels({
+    nodes: workflow.nodes,
+    chatConfig: workflow.chatConfig,
+    models: modelHandle.getActiveModels(),
+    defaultModelIds: modelHandle.getDefaultModelIds(authorizedIds),
+    modelReferencePolicy: 'fallback'
+  });
+  await beforeUpdateAppFormat({ nodes: workflow.nodes, teamId });
+
+  return { workflow, modelHandle };
+};
+
+/**
+ * 新建应用及初始版本、默认协作者。所有新增入口统一校验配额、父链与目录深度，
+ * 新建文件夹同时写入祖先路径；
+ * 复制、转换新建和工具集创建传入的 session 会继续复用，原地转换不走此入口。
+ */
+export const onCreateApp = async ({
+  parentId,
+  name,
+  intro,
+  avatar,
+  type,
+  nodes,
+  storageNodes,
+  edges,
+  chatConfig,
+  teamId,
+  tmbId,
+  pluginData,
+  username,
+  userAvatar,
+  templateId,
+  inheritPermission,
+  isRoot,
+  session
+}: {
+  parentId?: ParentIdType;
+  name?: string;
+  avatar?: string;
+  type: AppTypeEnum;
+  nodes?: unknown[];
+  storageNodes?: AppVersionSchemaType['nodes'];
+  edges?: AppVersionSchemaType['edges'];
+  chatConfig?: AppVersionSchemaType['chatConfig'];
+  intro?: string;
+  teamId: string;
+  tmbId: string;
+  pluginData?: AppSchemaType['pluginData'];
+  username?: string;
+  userAvatar?: string;
+  templateId?: string;
+  inheritPermission?: boolean;
+  isRoot?: boolean;
+  session?: ClientSession;
+}) => {
+  const isFolder = AppFolderTypeList.includes(type);
+
+  // 配额属于新增资源的约束，放在共享入口，避免复制或转换新建绕过路由校验。
+  await checkTeamAppTypeLimit({
+    teamId,
+    appCheckType: isFolder ? 'folder' : ToolTypeList.includes(type) ? 'tool' : 'app'
+  });
+
+  // 普通应用与工具分属两棵目录树，父文件夹类型必须是同一棵树内的文件夹。
+  await validateParentFolderType({ parentId, childType: type, session });
+
+  const folderTree = getAppFolderTree(type);
+  await checkCreateResourceParent({
+    parentId,
+    findResource: (id) =>
+      MongoApp.findOne({ _id: id, teamId }, '_id parentId type')
+        .session(session ?? null)
+        .lean(),
+    isFolder,
+    isFolderType: (parentType) =>
+      AppFolderTypeList.includes(parentType as AppTypeEnum) &&
+      (!folderTree || getAppFolderTree(parentType) === folderTree)
+  });
+
+  // 文件夹不创建版本记录，跳过工作流迁移、模型目录读取与资源权限过滤。
+  const preparedVersion = isFolder
+    ? undefined
+    : await (async () => {
+        const { workflow, modelHandle } = await formatAppWorkflowForSave({
+          appType: type,
+          nodes,
+          edges,
+          chatConfig,
+          teamId,
+          tmbId,
+          isRoot
+        });
+        // 新建、导入或复制应用时，仅将操作人有权限读取的资源写入初始快照，无权限或不存在的资源不阻断创建。
+        const resources = await filterAuthorizedAppResources({
+          resources: extractAppResources({
+            nodes: workflow.nodes,
+            chatConfig: workflow.chatConfig
+          }),
+          tmbId,
+          teamId,
+          isRoot,
+          modelHandle
+        });
+        return { workflow, resources };
+      })();
+
+  const create = async (session: ClientSession) => {
+    const _avatar = await (async () => {
+      if (!templateId || isPluginSystemTemplate(templateId)) return avatar;
+
+      const template = await MongoAppTemplate.findOne({ templateId }, 'avatar').lean();
+      if (!template?.avatar) return avatar;
+
+      const s3AvatarSource = getS3AvatarSource();
+      if (!isS3ObjectKey(template.avatar?.slice(s3AvatarSource.prefix.length), 'avatar')) {
+        return template.avatar;
+      }
+
+      return await copyAvatarImage({
+        teamId,
+        imageUrl: template.avatar,
+        temporary: true,
+        session
+      });
+    })();
+
+    const ancestorIds = isFolder
+      ? await getFolderAncestorIdsFromParentId({
+          parentId: parentId ? String(parentId) : null,
+          findFolder: (id) =>
+            MongoApp.findOne({ _id: id, teamId, type })
+              .select('_id parentId')
+              .session(session)
+              .lean()
+        })
+      : undefined;
+
+    const [app] = await MongoApp.create(
+      [
+        {
+          ...parseParentIdInMongo(parentId),
+          ...(ancestorIds ? { ancestorIds } : {}),
+          avatar: _avatar,
+          name,
+          intro,
+          teamId,
+          tmbId,
+          type,
+          version: 'v2',
+          pluginData,
+          templateId,
+          inheritPermission: inheritPermission ?? true
+        }
+      ],
+      { session, ordered: true }
+    );
+
+    const appId = String(app._id);
+
+    if (preparedVersion) {
+      const [version] = await MongoAppVersion.create(
+        [
+          {
+            tmbId,
+            appId,
+            nodes: storageNodes ?? preparedVersion.workflow.nodes,
+            edges: preparedVersion.workflow.edges,
+            chatConfig: preparedVersion.workflow.chatConfig,
+            versionName: name,
+            username,
+            avatar: userAvatar,
+            isPublish: true,
+            resources: preparedVersion.resources
+          }
+        ],
+        { session, ordered: true }
+      );
+      await MongoApp.updateOne(
+        { _id: appId },
+        {
+          $set: {
+            publishedVersionId: version._id,
+            'pluginData.nodeVersion': version._id
+          }
+        },
+        { session }
+      );
     }
 
-    // 凭证校验
-    const { teamId, tmbId } = await authUserNotVisitor({ req, authToken: true });
-
-    // 上限校验
-    await checkTeamAppLimit(teamId);
-
-    // 创建模型
-    const response = await MongoApp.create({
-      avatar,
-      name,
-      teamId,
+    await createResourceDefaultCollaborators({
+      resource: app,
+      resourceType: PerResourceTypeEnum.app,
       tmbId,
-      modules,
-      type
+      session
     });
 
-    jsonRes(res, {
-      data: response._id
+    await getS3AvatarSource().refreshAvatar(_avatar, undefined, session);
+
+    updateParentFoldersUpdateTime({
+      parentId
     });
-  } catch (err) {
-    jsonRes(res, {
-      code: 500,
-      error: err
-    });
+
+    (async () => {
+      addAuditLog({
+        tmbId,
+        teamId,
+        event: AuditEventEnum.CREATE_APP,
+        params: {
+          appName: name!,
+          appType: getI18nAppType(type!)
+        }
+      });
+    })();
+
+    return appId;
+  };
+
+  if (session) {
+    return create(session);
+  } else {
+    return await mongoSessionRun(create);
   }
-}
+};
+
+/**
+ * 将已有应用转换为 workflow 时写入其 workflow 数据。
+ *
+ * 该入口只服务 Transition 的 createNew=false 分支：源 workflow 可能是历史数据，写入前统一
+ * 产出 canonical 数据并格式化敏感字段。resources 直接复用当前最新 Version 的权限快照，不按
+ * 转化操作者重新校验或过滤。调用方必须传入同一事务的 session，普通更新接口不复用。
+ */
+export const onUpdateAppWorkflow = async ({
+  appId,
+  nodes,
+  edges,
+  chatConfig,
+  resources,
+  teamId,
+  tmbId,
+  isRoot,
+  session
+}: {
+  appId: string;
+  nodes?: AppVersionSchemaType['nodes'];
+  edges?: AppVersionSchemaType['edges'];
+  chatConfig?: AppVersionSchemaType['chatConfig'];
+  resources: AppResourcesType;
+  teamId: string;
+  tmbId: string;
+  isRoot?: boolean;
+  session?: ClientSession;
+}) => {
+  const { workflow } = await formatAppWorkflowForSave({
+    nodes,
+    edges,
+    chatConfig,
+    teamId,
+    tmbId,
+    isRoot
+  });
+
+  await MongoAppVersion.findOneAndUpdate(
+    { appId, isAutoSave: true },
+    {
+      tmbId,
+      appId,
+      isAutoSave: true,
+      nodes: workflow.nodes,
+      edges: workflow.edges,
+      chatConfig: workflow.chatConfig,
+      time: new Date(),
+      resources
+    },
+    { session, upsert: true, new: true }
+  );
+
+  return MongoApp.findByIdAndUpdate(
+    appId,
+    {
+      type: AppTypeEnum.workflow,
+      updateTime: new Date()
+    },
+    { session }
+  );
+};

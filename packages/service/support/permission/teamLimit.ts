@@ -1,41 +1,22 @@
-import { getVectorCountByTeamId } from '../../common/vectorStore/controller';
-import { getTeamPlanStatus, getTeamStandPlan } from '../../support/wallet/sub/utils';
+import { getTeamPlanStatus, getTeamStandPlan, teamPoint } from '../../support/wallet/sub/utils';
 import { MongoApp } from '../../core/app/schema';
-import { MongoPlugin } from '../../core/plugin/schema';
 import { MongoDataset } from '../../core/dataset/schema';
 import { DatasetTypeEnum } from '@fastgpt/global/core/dataset/constants';
 import { TeamErrEnum } from '@fastgpt/global/common/error/code/team';
-
-export const checkDatasetLimit = async ({
-  teamId,
-  insertLen = 0
-}: {
-  teamId: string;
-  insertLen?: number;
-}) => {
-  const [{ standardConstants, totalPoints, usedPoints, datasetMaxSize }, usedSize] =
-    await Promise.all([getTeamPlanStatus({ teamId }), getVectorCountByTeamId(teamId)]);
-
-  if (!standardConstants) return;
-
-  if (usedSize + insertLen >= datasetMaxSize) {
-    return Promise.reject(TeamErrEnum.datasetSizeNotEnough);
-  }
-
-  if (usedPoints >= totalPoints) {
-    return Promise.reject(TeamErrEnum.aiPointsNotEnough);
-  }
-  return;
-};
+import { SystemErrEnum } from '@fastgpt/global/common/error/code/system';
+import { AppTypeList, ToolTypeList, AppFolderTypeList } from '@fastgpt/global/core/app/constants';
+import { MongoTeamMember } from '../user/team/teamMemberSchema';
+import { TeamMemberStatusEnum } from '@fastgpt/global/support/user/team/constant';
+import { getVectorCountByTeamId } from '../../common/vectorDB/controller';
+import { ReadPreference } from '../../common/mongo';
+import { serviceEnv } from '../../env';
 
 export const checkTeamAIPoints = async (teamId: string) => {
-  const { standardConstants, totalPoints, usedPoints } = await getTeamPlanStatus({
-    teamId
-  });
+  if (!global.subPlans?.standard) return;
 
-  if (!standardConstants) return;
+  const { totalPoints, usedPoints } = await teamPoint.getTeamPoints({ teamId });
 
-  if (usedPoints >= totalPoints) {
+  if (usedPoints !== null && totalPoints !== null && usedPoints >= totalPoints) {
     return Promise.reject(TeamErrEnum.aiPointsNotEnough);
   }
 
@@ -45,8 +26,125 @@ export const checkTeamAIPoints = async (teamId: string) => {
   };
 };
 
+export const checkTeamMemberLimit = async (teamId: string, newCount: number) => {
+  const [{ standard }, memberCount] = await Promise.all([
+    getTeamStandPlan({
+      teamId,
+      // 成员上限属于强一致的权限校验，不能接受从库复制延迟导致放行超额成员。
+      readPreference: ReadPreference.PRIMARY
+    }),
+    MongoTeamMember.countDocuments({
+      teamId,
+      status: { $ne: TeamMemberStatusEnum.leave }
+    })
+  ]);
+
+  if (standard?.maxTeamMember && newCount + memberCount > standard.maxTeamMember) {
+    return Promise.reject(TeamErrEnum.teamOverSize);
+  }
+};
+
+export const checkTeamDatasetFolderLimit = async ({
+  teamId,
+  amount = 1
+}: {
+  teamId: string;
+  amount?: number;
+}) => {
+  const folderCount = await MongoDataset.countDocuments({
+    teamId,
+    type: DatasetTypeEnum.folder
+  });
+  if (folderCount + amount > serviceEnv.DATASET_FOLDER_MAX_AMOUNT) {
+    return Promise.reject(TeamErrEnum.datasetFolderAmountNotEnough);
+  }
+};
+
+/** 按 Agent、工具、文件夹分别校验新增数量，Agent 口径与账号资源用量共用 AppTypeList。 */
+export const checkTeamAppTypeLimit = async ({
+  teamId,
+  appCheckType,
+  amount = 1
+}: {
+  teamId: string;
+  appCheckType: 'app' | 'tool' | 'folder';
+  amount?: number;
+}) => {
+  if (appCheckType === 'app') {
+    const [{ standard }, appCount] = await Promise.all([
+      getTeamStandPlan({ teamId, readPreference: ReadPreference.PRIMARY }),
+      MongoApp.countDocuments({
+        teamId,
+        type: {
+          $in: AppTypeList
+        }
+      })
+    ]);
+
+    if (standard?.maxAppAmount && appCount + amount > standard.maxAppAmount) {
+      return Promise.reject(TeamErrEnum.appAmountNotEnough);
+    }
+
+    // System check
+    if (global?.licenseData?.maxApps && typeof global?.licenseData?.maxApps === 'number') {
+      const totalApps = await MongoApp.countDocuments({
+        type: {
+          $in: AppTypeList
+        }
+      });
+      if (totalApps + amount > global.licenseData.maxApps) {
+        return Promise.reject(SystemErrEnum.licenseAppAmountLimit);
+      }
+    }
+  } else if (appCheckType === 'tool') {
+    const toolCount = await MongoApp.countDocuments({
+      teamId,
+      type: {
+        $in: ToolTypeList
+      }
+    });
+    const maxToolAmount = 1000;
+    if (toolCount + amount > maxToolAmount) {
+      return Promise.reject(TeamErrEnum.pluginAmountNotEnough);
+    }
+  } else if (appCheckType === 'folder') {
+    const folderCount = await MongoApp.countDocuments({
+      teamId,
+      type: {
+        $in: AppFolderTypeList
+      }
+    });
+    const maxAppFolderAmount = serviceEnv.APP_FOLDER_MAX_AMOUNT;
+    if (folderCount + amount > maxAppFolderAmount) {
+      return Promise.reject(TeamErrEnum.appFolderAmountNotEnough);
+    }
+  }
+};
+
+export const checkDatasetIndexLimit = async ({
+  teamId,
+  insertLen = 0
+}: {
+  teamId: string;
+  insertLen?: number;
+}) => {
+  const [{ standard, totalPoints, usedPoints, datasetMaxSize }, usedDatasetIndexSize] =
+    await Promise.all([getTeamPlanStatus({ teamId }), getVectorCountByTeamId(teamId)]);
+
+  if (!standard) return;
+
+  if (datasetMaxSize !== null && usedDatasetIndexSize + insertLen >= datasetMaxSize) {
+    return Promise.reject(TeamErrEnum.datasetSizeNotEnough);
+  }
+
+  if (usedPoints !== null && totalPoints !== null && usedPoints >= totalPoints) {
+    return Promise.reject(TeamErrEnum.aiPointsNotEnough);
+  }
+  return;
+};
+
 export const checkTeamDatasetLimit = async (teamId: string) => {
-  const [{ standardConstants }, datasetCount] = await Promise.all([
+  const [{ standard }, datasetCount] = await Promise.all([
     getTeamStandPlan({ teamId }),
     MongoDataset.countDocuments({
       teamId,
@@ -54,38 +152,40 @@ export const checkTeamDatasetLimit = async (teamId: string) => {
     })
   ]);
 
-  if (standardConstants && datasetCount >= standardConstants.maxDatasetAmount) {
+  // User check
+  if (standard?.maxDatasetAmount && datasetCount >= standard.maxDatasetAmount) {
     return Promise.reject(TeamErrEnum.datasetAmountNotEnough);
   }
-};
-export const checkTeamAppLimit = async (teamId: string) => {
-  const [{ standardConstants }, appCount] = await Promise.all([
-    getTeamStandPlan({ teamId }),
-    MongoApp.count({ teamId })
-  ]);
 
-  if (standardConstants && appCount >= standardConstants.maxAppAmount) {
-    return Promise.reject(TeamErrEnum.appAmountNotEnough);
-  }
-};
-export const checkTeamPluginLimit = async (teamId: string) => {
-  const [{ standardConstants }, pluginCount] = await Promise.all([
-    getTeamStandPlan({ teamId }),
-    MongoPlugin.count({ teamId })
-  ]);
-
-  if (standardConstants && pluginCount >= standardConstants.maxAppAmount) {
-    return Promise.reject(TeamErrEnum.pluginAmountNotEnough);
+  // System check
+  if (global?.licenseData?.maxDatasets && typeof global?.licenseData?.maxDatasets === 'number') {
+    const totalDatasets = await MongoDataset.countDocuments({
+      type: { $ne: DatasetTypeEnum.folder }
+    });
+    if (totalDatasets >= global.licenseData.maxDatasets) {
+      return Promise.reject(SystemErrEnum.licenseDatasetAmountLimit);
+    }
   }
 };
 
-export const checkTeamReRankPermission = async (teamId: string) => {
-  const { standardConstants } = await getTeamStandPlan({
+export const checkTeamDatasetSyncPermission = async (teamId: string) => {
+  const { standard } = await getTeamStandPlan({
     teamId
   });
 
-  if (standardConstants && !standardConstants?.permissionReRank) {
-    return false;
+  if (standard && !standard?.websiteSyncPerDataset) {
+    return Promise.reject(TeamErrEnum.websiteSyncNotEnough);
   }
-  return true;
+};
+
+export const checkTeamSandboxPermission = async (teamId: string) => {
+  if (!global.subPlans?.standard) return;
+
+  const { standard } = await getTeamStandPlan({
+    teamId
+  });
+
+  if (standard && !standard?.enableSandbox) {
+    return Promise.reject(TeamErrEnum.sandboxNotSupport);
+  }
 };

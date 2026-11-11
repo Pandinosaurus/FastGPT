@@ -1,12 +1,13 @@
-import { connectionMongo, type Model } from '../../common/mongo';
-const { Schema, model, models } = connectionMongo;
-import { OutLinkSchema as SchemaType } from '@fastgpt/global/support/outLink/type';
-import { OutLinkTypeEnum } from '@fastgpt/global/support/outLink/constant';
+import { defineIndex, connectionMongo, getMongoModel } from '../../common/mongo';
+const { Schema } = connectionMongo;
+import { type OutLinkSchemaType } from '@fastgpt/global/support/outLink/type';
 import {
   TeamCollectionName,
   TeamMemberCollectionName
 } from '@fastgpt/global/support/user/team/constant';
-import { appCollectionName } from '../../core/app/schema';
+import { AppCollectionName } from '../../core/app/schema';
+import { getLogger, LogCategories } from '../../common/logger';
+import { PublishChannelEnum } from '@fastgpt/global/support/outLink/constant';
 
 const OutLinkSchema = new Schema({
   shareId: {
@@ -25,12 +26,12 @@ const OutLinkSchema = new Schema({
   },
   appId: {
     type: Schema.Types.ObjectId,
-    ref: appCollectionName,
+    ref: AppCollectionName,
     required: true
   },
   type: {
     type: String,
-    default: OutLinkTypeEnum.share
+    required: true
   },
   name: {
     type: String,
@@ -43,9 +44,36 @@ const OutLinkSchema = new Schema({
   lastTime: {
     type: Date
   },
-  responseDetail: {
+
+  showRunningStatus: {
     type: Boolean,
     default: false
+  },
+  showSkillReferences: {
+    type: Boolean,
+    default: false
+  },
+  showCite: {
+    type: Boolean,
+    default: false
+  },
+  showFullText: {
+    type: Boolean,
+    default: false
+  },
+  canDownloadSource: {
+    type: Boolean,
+    default: false
+  },
+  showWholeResponse: {
+    type: Boolean,
+    default: true
+  },
+  isShowBrand: {
+    type: Boolean
+  },
+  allowAnonymous: {
+    type: Boolean
   },
   limit: {
     maxUsagePoints: {
@@ -62,16 +90,49 @@ const OutLinkSchema = new Schema({
     hookUrl: {
       type: String
     }
-  }
+  },
+
+  // Third part app config
+  app: {
+    type: Object // could be FeishuAppType | WecomAppType | ...
+  },
+  immediateResponse: {
+    type: String
+  },
+  defaultResponse: {
+    type: String
+  },
+
+  //@deprecated
+  responseDetail: Boolean,
+  showNodeStatus: Boolean,
+  showRawSource: Boolean
 });
 
-try {
-  OutLinkSchema.index({ shareId: -1 });
-} catch (error) {
-  console.log(error);
-}
+OutLinkSchema.virtual('associatedApp', {
+  ref: AppCollectionName,
+  localField: 'appId',
+  foreignField: '_id',
+  justOne: true
+});
 
-export const MongoOutLink: Model<SchemaType> =
-  models['outlinks'] || model('outlinks', OutLinkSchema);
+const logger = getLogger(LogCategories.INFRA.MONGO);
 
-MongoOutLink.syncIndexes();
+defineIndex(OutLinkSchema, { key: { shareId: -1 } });
+defineIndex(OutLinkSchema, { key: { teamId: 1, tmbId: 1, appId: 1 } });
+defineIndex(OutLinkSchema, { key: { teamId: 1, appId: 1, type: 1 } });
+// 一个 Bot 只能绑定一个长连接渠道；旧 Webhook 和其他类型不受此约束。
+defineIndex(OutLinkSchema, {
+  key: { 'app.botId': 1 },
+  options: {
+    unique: true,
+    partialFilterExpression: { type: PublishChannelEnum.wecomWebsocket }
+  }
+});
+// Wechat polling recovery: find online channels on startup
+defineIndex(OutLinkSchema, {
+  key: { type: 1, 'app.status': 1 },
+  options: { partialFilterExpression: { type: 'wechat', 'app.status': 'online' } }
+});
+
+export const MongoOutLink = getMongoModel<OutLinkSchemaType>('outlinks', OutLinkSchema);

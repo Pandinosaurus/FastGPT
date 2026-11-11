@@ -1,8 +1,7 @@
-import { create } from 'zustand';
-import { devtools, persist } from 'zustand/middleware';
-import { immer } from 'zustand/middleware/immer';
+import { create, devtools, persist, immer } from '@fastgpt/web/common/zustand';
+
 import type { SearchDataResponseItemType } from '@fastgpt/global/core/dataset/type';
-import { DatasetSearchModeEnum } from '@fastgpt/global/core/dataset/constants';
+import type { DatasetSearchModeEnum } from '@fastgpt/global/core/dataset/constants';
 
 export type SearchTestStoreItemType = {
   id: string;
@@ -11,11 +10,15 @@ export type SearchTestStoreItemType = {
   time: Date;
   duration: string;
   results: SearchDataResponseItemType[];
+  queryImageRefs?: {
+    key: string;
+    previewUrl?: string;
+  }[];
   searchMode: `${DatasetSearchModeEnum}`;
   limit: number;
   usingReRank: boolean;
   similarity: number;
-  usingQueryExtension: boolean;
+  queryExtensionModel?: string;
 };
 
 type State = {
@@ -28,11 +31,11 @@ type State = {
 export const useSearchTestStore = create<State>()(
   devtools(
     persist(
-      immer((set, get) => ({
+      immer((set) => ({
         datasetTestList: [],
         pushDatasetTestItem(data) {
           set((state) => {
-            state.datasetTestList = [data, ...state.datasetTestList].slice(0, 100);
+            state.datasetTestList = [data, ...state.datasetTestList].slice(0, 50);
           });
         },
         delDatasetTestItemById(id) {

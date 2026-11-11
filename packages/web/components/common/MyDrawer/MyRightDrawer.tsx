@@ -7,11 +7,13 @@ import {
   DrawerOverlay,
   DrawerContent,
   DrawerCloseButton,
-  DrawerContentProps,
+  type DrawerContentProps,
   Flex,
-  Image
+  Image,
+  Box
 } from '@chakra-ui/react';
 import { useLoading } from '../../../hooks/useLoading';
+import Avatar from '../Avatar';
 
 type Props = DrawerContentProps & {
   onClose: () => void;
@@ -24,7 +26,7 @@ const MyRightDrawer = ({
   onClose,
   iconSrc,
   title,
-  maxW = ['90vw', '30vw'],
+  maxW = ['90vw', '500px'],
   children,
   isLoading,
   ...props
@@ -35,30 +37,35 @@ const MyRightDrawer = ({
       <DrawerOverlay />
       <DrawerContent
         maxW={maxW}
-        {...props}
         h={'94%'}
         mt={'2%'}
+        {...props}
         borderLeftRadius={'lg'}
         overflow={'hidden'}
       >
-        <DrawerCloseButton />
-        <DrawerHeader>
-          <Flex alignItems={'center'} pr={2}>
-            {iconSrc && (
-              <>
-                {iconSrc.startsWith('/') ? (
-                  <Image mr={3} objectFit={'contain'} alt="" src={iconSrc} w={'20px'} />
-                ) : (
-                  <MyIcon mr={3} name={iconSrc as any} w={'20px'} />
-                )}
-              </>
-            )}
+        <Flex
+          display={'flex'}
+          alignItems={'center'}
+          fontWeight={500}
+          background={'#FBFBFC'}
+          borderBottom={'1px solid #F4F6F8'}
+          roundedTop={'lg'}
+          py={'10px'}
+          px={5}
+        >
+          {iconSrc && <Avatar mr={3} w={'20px'} src={iconSrc} />}
+          <Box flex={'1'} fontSize={'md'}>
             {title}
-          </Flex>
-          <DrawerCloseButton zIndex={1} />
-        </DrawerHeader>
+          </Box>
+          <DrawerCloseButton position={'relative'} fontSize={'sm'} top={0} right={0} />
+        </Flex>
 
-        <DrawerBody>
+        <DrawerBody
+          overflowY={props?.overflowY || 'auto'}
+          display={'flex'}
+          flexDirection={'column'}
+          px={props?.px ?? 4}
+        >
           {children}
           <Loading loading={isLoading} fixed={false} />
         </DrawerBody>

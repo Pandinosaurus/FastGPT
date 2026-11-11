@@ -1,40 +1,65 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
-import { authCert } from '@fastgpt/service/support/permission/auth/common';
-import type { CloseCustomFeedbackParams } from '@/global/core/chat/api.d';
+import { ChatRoleEnum } from '@fastgpt/global/core/chat/constants';
+import type { ApiRequestProps } from '@fastgpt/next/type';
+import { NextAPI } from '@/service/middleware/entry';
 import { MongoChatItem } from '@fastgpt/service/core/chat/chatItemSchema';
-import { autChatCrud } from '@/service/support/permission/auth/chat';
+import { authChatTargetCrud } from '@fastgpt/service/core/chat/auth';
+import { mongoSessionRun } from '@fastgpt/service/common/mongo/sessionRun';
+import { updateChatFeedbackCount } from '@fastgpt/service/core/chat/controller';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
+import {
+  CloseCustomFeedbackBodySchema,
+  CloseCustomFeedbackResponseSchema,
+  type CloseCustomFeedbackResponseType
+} from '@fastgpt/global/openapi/core/chat/feedback/api';
+import { buildChatSourceQuery } from '@fastgpt/service/core/chat/source';
 
-/* remove custom feedback */
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  try {
-    await connectToDatabase();
-    const { appId, chatId, chatItemId, index } = req.body as CloseCustomFeedbackParams;
-
-    if (!chatItemId || !appId || !chatId || !chatItemId) {
-      throw new Error('missing parameter');
-    }
-
-    await autChatCrud({
+async function handler(req: ApiRequestProps): Promise<CloseCustomFeedbackResponseType> {
+  const { customUid, authProxy, sourceType, sourceId, chatId, dataId, index, outLinkAuthData } =
+    parseApiInput({
       req,
-      authToken: true,
-      appId,
-      chatId,
-      per: 'r'
-    });
-    await authCert({ req, authToken: true });
+      bodySchema: CloseCustomFeedbackBodySchema
+    }).body;
 
+  const authRes = await authChatTargetCrud({
+    customUid,
+    authProxy,
+    req,
+    authToken: true,
+    authApiKey: true,
+    sourceType,
+    sourceId,
+    chatId,
+    outLinkAuthData
+  });
+  const resolvedSourceId = authRes.sourceId;
+  const chatSourceQuery = buildChatSourceQuery({ sourceType, sourceId: resolvedSourceId });
+
+  await mongoSessionRun(async (session) => {
+    // 同一轮 Human/AI 共用 dataId，两个写入都必须限定 AI，避免命中用户消息。
+    // Remove custom feedback at index
     await MongoChatItem.findOneAndUpdate(
-      { appId, chatId, dataId: chatItemId },
-      { $unset: { [`customFeedbacks.${index}`]: 1 } }
+      { ...chatSourceQuery, chatId, dataId, obj: ChatRoleEnum.AI },
+      { $unset: { [`customFeedbacks.${index}`]: 1 } },
+      { session }
     );
 
-    jsonRes(res);
-  } catch (err) {
-    jsonRes(res, {
-      code: 500,
-      error: err
+    // Remove null values from array
+    await MongoChatItem.updateOne(
+      { ...chatSourceQuery, chatId, dataId, obj: ChatRoleEnum.AI },
+      { $pull: { customFeedbacks: null } },
+      { session }
+    );
+
+    // Update ChatLog feedback statistics
+    await updateChatFeedbackCount({
+      sourceType,
+      sourceId: resolvedSourceId,
+      chatId,
+      session
     });
-  }
+  });
+
+  return CloseCustomFeedbackResponseSchema.parse(undefined);
 }
+
+export default NextAPI(handler);

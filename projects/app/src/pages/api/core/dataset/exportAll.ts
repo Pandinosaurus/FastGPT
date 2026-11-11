@@ -1,93 +1,169 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes, responseWriteController } from '@fastgpt/service/common/response';
-import { connectToDatabase } from '@/service/mongo';
-import { addLog } from '@fastgpt/service/common/system/log';
-import { authDataset } from '@fastgpt/service/support/permission/auth/dataset';
+import { responseWriteController } from '@fastgpt/service/common/response';
+import { getLogger, LogCategories } from '@fastgpt/service/common/logger';
+import { authDataset } from '@fastgpt/service/support/permission/dataset/auth';
+import { resolveReadableCollectionIds } from '@fastgpt/service/support/permission/collection/auth';
 import { MongoDatasetData } from '@fastgpt/service/core/dataset/data/schema';
-import { findDatasetAndAllChildren } from '@fastgpt/service/core/dataset/controller';
-import { withNextCors } from '@fastgpt/service/common/middle/cors';
 import {
   checkExportDatasetLimit,
   updateExportDatasetLimit
 } from '@fastgpt/service/support/user/utils';
+import { NextAPI } from '@/service/middleware/entry';
+import { WritePermissionVal } from '@fastgpt/global/support/permission/constant';
+import { DatasetTypeEnum } from '@fastgpt/global/core/dataset/constants';
+import { DatasetErrEnum } from '@fastgpt/global/common/error/code/dataset';
+import { Types } from '@fastgpt/service/common/mongo';
+import { readFromSecondary } from '@fastgpt/service/common/mongo/utils';
+import type { DatasetDataSchemaType } from '@fastgpt/global/core/dataset/type';
+import {
+  datasetDataSystemIndexTypes,
+  getDatasetDataExternalIndexes
+} from '@fastgpt/global/core/dataset/data/utils';
+import { sanitizeCsvField } from '@fastgpt/service/common/file/csv';
+import { ExportDatasetQuerySchema } from '@fastgpt/global/openapi/core/dataset/api';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
 
-export default withNextCors(async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
-  try {
-    await connectToDatabase();
-    let { datasetId } = req.query as {
-      datasetId: string;
-    };
+const logger = getLogger(LogCategories.MODULE.DATASET.DATA);
 
-    if (!datasetId || !global.pgClient) {
-      throw new Error('缺少参数');
-    }
+type DataItemType = {
+  _id: string;
+  q: string;
+  a: string;
+  indexes: DatasetDataSchemaType['indexes'];
+  metadata?: Record<string, any>;
+};
 
-    // 凭证校验
-    const { teamId } = await authDataset({ req, authToken: true, datasetId, per: 'w' });
+type ExportSchemaType = {
+  maxIndexCount?: number;
+  hasMetadata?: number;
+};
 
-    await checkExportDatasetLimit({
-      teamId,
-      limitMinutes: global.feConfigs?.limit?.exportDatasetLimitMinutes
-    });
+async function handler(req: NextApiRequest, res: NextApiResponse<any>) {
+  const { datasetId } = parseApiInput({ req, querySchema: ExportDatasetQuerySchema }).query;
 
-    const datasets = await findDatasetAndAllChildren({
-      teamId,
-      datasetId,
-      fields: '_id'
-    });
+  // 凭证校验
+  const { teamId, tmbId, dataset } = await authDataset({
+    req,
+    authToken: true,
+    datasetId,
+    per: WritePermissionVal
+  });
 
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8;');
-    res.setHeader('Content-Disposition', 'attachment; filename=dataset.csv; ');
-
-    const cursor = MongoDatasetData.find<{
-      _id: string;
-      collectionId: { name: string };
-      q: string;
-      a: string;
-    }>(
-      {
-        teamId,
-        datasetId: { $in: datasets.map((d) => d._id) }
-      },
-      'q a'
-    )
-      .limit(50000)
-      .cursor();
-
-    const write = responseWriteController({
-      res,
-      readStream: cursor
-    });
-
-    write(`\uFEFFindex,content`);
-
-    cursor.on('data', (doc) => {
-      const q = doc.q.replace(/"/g, '""') || '';
-      const a = doc.a.replace(/"/g, '""') || '';
-
-      write(`\n"${q}","${a}"`);
-    });
-
-    cursor.on('end', () => {
-      cursor.close();
-      res.end();
-      updateExportDatasetLimit(teamId);
-    });
-
-    cursor.on('error', (err) => {
-      addLog.error(`export dataset error`, err);
-      res.status(500);
-      res.end();
-    });
-  } catch (err) {
-    res.status(500);
-    addLog.error(`export dataset error`, err);
-    jsonRes(res, {
-      code: 500,
-      error: err
-    });
+  // 目录不支持导出：其子知识库可能有独立权限，目录权限无法代表子知识库的读权限。
+  if (dataset.type === DatasetTypeEnum.folder) {
+    return Promise.reject(DatasetErrEnum.exportFolderNotSupported);
   }
-});
+
+  await checkExportDatasetLimit({
+    teamId,
+    limitMinutes: global.feConfigs?.limit?.exportDatasetLimitMinutes
+  });
+
+  // 文件级权限：只导出当前成员可读的 Collection；undefined 表示无需过滤（团队 owner /
+  // 未启用 collection 权限）。
+  const readableCollectionIds = await resolveReadableCollectionIds({
+    teamId: String(teamId),
+    datasetIds: [String(dataset._id)],
+    tmbId: String(tmbId)
+  });
+
+  const match = {
+    teamId: new Types.ObjectId(teamId),
+    datasetId: new Types.ObjectId(dataset._id),
+    ...(readableCollectionIds
+      ? { collectionId: { $in: readableCollectionIds.map((id) => new Types.ObjectId(id)) } }
+      : {})
+  };
+
+  const [exportSchema] = await MongoDatasetData.aggregate<ExportSchemaType>(
+    [
+      { $match: match },
+      { $limit: 50000 },
+      {
+        $project: {
+          // 系统索引（default / imageEmbedding）不计入列数：它们由 q/a/图片自动生成，
+          // 计入会让表头恒多出列，且回导时被当成用户索引重新写入。
+          indexCount: {
+            $size: {
+              $filter: {
+                input: { $ifNull: ['$indexes', []] },
+                cond: { $not: { $in: ['$$this.type', datasetDataSystemIndexTypes] } }
+              }
+            }
+          },
+          hasMetadata: {
+            $cond: [{ $eq: [{ $type: '$metadata' }, 'object'] }, 1, 0]
+          }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          maxIndexCount: { $max: '$indexCount' },
+          hasMetadata: { $max: '$hasMetadata' }
+        }
+      }
+    ],
+    { ...readFromSecondary }
+  );
+
+  const indexCount = exportSchema?.maxIndexCount || 0;
+  const hasMetadata = exportSchema?.hasMetadata === 1;
+  const headers = [
+    'q',
+    'a',
+    ...Array.from({ length: indexCount }, () => 'index'),
+    ...(hasMetadata ? ['metadata'] : [])
+  ];
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8;');
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename=${encodeURIComponent(dataset.name)}-backup.csv;`
+  );
+
+  const cursor = MongoDatasetData.find<DataItemType>(match, 'q a indexes metadata', {
+    ...readFromSecondary
+  })
+    .limit(50000)
+    .cursor();
+
+  const write = responseWriteController({
+    res,
+    readStream: cursor
+  });
+
+  write(`\uFEFF${headers.join(',')}`);
+
+  cursor.on('data', (doc: DataItemType) => {
+    const sanitizedQ = sanitizeCsvField(doc.q || '');
+    const sanitizedA = sanitizeCsvField(doc.a || '');
+    const exportIndexes = getDatasetDataExternalIndexes(doc.indexes);
+    const sanitizedIndexes = Array.from({ length: indexCount }, (_, index) =>
+      sanitizeCsvField(exportIndexes[index]?.text || '')
+    );
+    const sanitizedMetadata = hasMetadata
+      ? [sanitizeCsvField(doc.metadata ? JSON.stringify(doc.metadata) : '')]
+      : [];
+
+    write(`\n${[sanitizedQ, sanitizedA, ...sanitizedIndexes, ...sanitizedMetadata].join(',')}`);
+  });
+
+  cursor.on('end', () => {
+    cursor.close();
+    res.end();
+  });
+
+  cursor.on('error', (err) => {
+    logger.error(`export dataset error`, { error: err });
+    res.status(500);
+    res.end();
+  });
+
+  updateExportDatasetLimit(teamId);
+}
+
+export default NextAPI(handler);
 
 export const config = {
   api: {

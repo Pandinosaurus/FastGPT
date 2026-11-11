@@ -1,13 +1,13 @@
-import { connectionMongo, type Model } from '../../../common/mongo';
-const { Schema, model, models } = connectionMongo;
-import { TeamMemberSchema as TeamMemberType } from '@fastgpt/global/support/user/team/type.d';
+import { defineIndex, connectionMongo, getMongoModel } from '../../../common/mongo';
+const { Schema } = connectionMongo;
+import { type TeamMemberSchema as TeamMemberType } from '@fastgpt/global/support/user/team/type';
 import { userCollectionName } from '../../user/schema';
 import {
-  TeamMemberRoleMap,
   TeamMemberStatusMap,
   TeamMemberCollectionName,
   TeamCollectionName
 } from '@fastgpt/global/support/user/team/constant';
+import { getRandomUserAvatar } from '@fastgpt/global/support/user/utils';
 
 const TeamMemberSchema = new Schema({
   teamId: {
@@ -20,13 +20,24 @@ const TeamMemberSchema = new Schema({
     ref: userCollectionName,
     required: true
   },
+  avatar: {
+    type: String,
+    default: () => getRandomUserAvatar()
+  },
   name: {
     type: String,
+    required: true,
+    trim: true,
     default: 'Member'
   },
-  role: {
-    type: String,
-    enum: Object.keys(TeamMemberRoleMap)
+  /**
+   * 成员名是否由显式来源设置（本人/管理员/邀请/第三方有效下发）。
+   * false 表示 name 是待确认的 username 回落值，成员首次登录需强制补齐；owner 创建时应写为 true。
+   * 存量文档由迁移任务回填，读取侧将缺失值按未设置处理。
+   */
+  isSetMemberName: {
+    type: Boolean,
+    default: false
   },
   status: {
     type: String,
@@ -36,18 +47,53 @@ const TeamMemberSchema = new Schema({
     type: Date,
     default: () => new Date()
   },
+  updateTime: {
+    type: Date
+  },
+
+  /** @deprecated
+   * But some code still use this to judge whether the member is a owner.
+   * TODO: Remove this field and replace it with a more appropriate way to determine ownership.
+   */
+  role: {
+    type: String
+  },
+  /** @deprecated */
   defaultTeam: {
-    type: Boolean,
-    default: false
+    type: Boolean
   }
 });
 
-try {
-  TeamMemberSchema.index({ teamId: 1 }, { background: true });
-  TeamMemberSchema.index({ userId: 1 }, { background: true });
-} catch (error) {
-  console.log(error);
-}
+TeamMemberSchema.virtual('team', {
+  ref: TeamCollectionName,
+  localField: 'teamId',
+  foreignField: '_id',
+  justOne: true
+});
+TeamMemberSchema.virtual('user', {
+  ref: userCollectionName,
+  localField: 'userId',
+  foreignField: '_id',
+  justOne: true
+});
 
-export const MongoTeamMember: Model<TeamMemberType> =
-  models[TeamMemberCollectionName] || model(TeamMemberCollectionName, TeamMemberSchema);
+defineIndex(TeamMemberSchema, {
+  key: { teamId: 1 },
+  options: { background: true }
+});
+
+defineIndex(TeamMemberSchema, {
+  key: { userId: 1, teamId: 1 },
+  options: { unique: true, background: true }
+});
+
+defineIndex(TeamMemberSchema, {
+  key: { userId: 1 },
+  deprecated: true,
+  options: { background: true }
+});
+
+export const MongoTeamMember = getMongoModel<TeamMemberType>(
+  TeamMemberCollectionName,
+  TeamMemberSchema
+);

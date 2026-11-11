@@ -1,422 +1,736 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import Head from 'next/head';
+import ShareBrand from '@/pageComponents/chat/ShareBrand';
+import type { ShareBrandSession } from '@/pageComponents/chat/useShareBrandTracking';
+import ComplianceTip from '@/components/common/ComplianceTip';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/router';
-import { Box, Flex, useDisclosure, Drawer, DrawerOverlay, DrawerContent } from '@chakra-ui/react';
-import { useToast } from '@fastgpt/web/hooks/useToast';
-import { useSystemStore } from '@/web/common/system/useSystemStore';
-import { useQuery } from '@tanstack/react-query';
+import { Box, Flex, IconButton } from '@chakra-ui/react';
 import { streamFetch } from '@/web/common/api/fetch';
-import { useShareChatStore } from '@/web/core/chat/storeShareChat';
 import SideBar from '@/components/SideBar';
-import { GPTMessages2Chats } from '@fastgpt/global/core/chat/adapt';
-import { getErrText } from '@fastgpt/global/common/error/utils';
-import type { ChatHistoryItemType, ChatSiteItemType } from '@fastgpt/global/core/chat/type.d';
-import { customAlphabet } from 'nanoid';
-const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz1234567890', 12);
 
-import ChatBox from '@/components/ChatBox';
-import type { ComponentRef, StartChatFnProps } from '@/components/ChatBox/type.d';
+import ChatBox from '@/components/core/chat/ChatContainer/ChatBox';
+import type { StartChatFnProps } from '@/components/core/chat/ChatContainer/type';
+
 import PageContainer from '@/components/PageContainer';
-import ChatHeader from './components/ChatHeader';
-import ChatHistorySlider from './components/ChatHistorySlider';
-import { serviceSideProps } from '@/web/common/utils/i18n';
-import { checkChatSupportSelectFileByChatModels } from '@/web/core/chat/utils';
-import { useTranslation } from 'next-i18next';
+import { serviceSideProps } from '@/web/common/i18n/utils';
+import { LANG_KEY, SHARE_LANG_KEY } from '@fastgpt/web/i18n/utils';
+import { useSafeTranslation } from '@fastgpt/web/hooks/useSafeTranslation';
 import { getInitOutLinkChatInfo } from '@/web/core/chat/api';
-import { getChatTitleFromChatMessage } from '@fastgpt/global/core/chat/utils';
-import { useChatStore } from '@/web/core/chat/storeChat';
-import { ChatRoleEnum, ChatStatusEnum } from '@fastgpt/global/core/chat/constants';
-import MyBox from '@/components/common/MyBox';
 import { MongoOutLink } from '@fastgpt/service/support/outLink/schema';
-import { OutLinkWithAppType } from '@fastgpt/global/support/outLink/type';
+import { PublishChannelEnum } from '@fastgpt/global/support/outLink/constant';
+import { getLogger, LogCategories } from '@fastgpt/service/common/logger';
 
-const OutLink = ({
-  appName,
-  appIntro,
-  appAvatar
-}: {
-  appName?: string;
-  appIntro?: string;
-  appAvatar?: string;
-}) => {
-  const { t } = useTranslation();
+import NextHead from '@/components/common/NextHead';
+import { useContextSelector } from 'use-context-selector';
+import ChatContextProvider, { ChatContext } from '@/web/core/chat/context/chatContext';
+import { ChatSourceTypeEnum, GetChatTypeEnum } from '@fastgpt/global/core/chat/constants';
+import { useMount } from 'ahooks';
+import { useRequest } from '@fastgpt/web/hooks/useRequest';
+import { getNanoid } from '@fastgpt/global/common/string/tools';
+
+import dynamic from 'next/dynamic';
+import { useSystem } from '@fastgpt/web/hooks/useSystem';
+import { useShareChatStore } from '@/web/core/chat/storeShareChat';
+import ChatItemContextProvider, { ChatItemContext } from '@/web/core/chat/context/chatItemContext';
+import ChatRecordContextProvider, {
+  ChatRecordContext
+} from '@/web/core/chat/context/chatRecordContext';
+import { getDisplayHistoryTitle } from '@/web/core/chat/context/historyTitleUtils';
+import { useChatStore } from '@/web/core/chat/context/useChatStore';
+import { ChatSourceEnum } from '@fastgpt/global/core/chat/constants';
+import { type AppSchemaType } from '@fastgpt/global/core/app/type';
+import ChatQuoteList from '@/pageComponents/chat/ChatQuoteList';
+import { useToast } from '@fastgpt/web/hooks/useToast';
+import { ChatTypeEnum } from '@/components/core/chat/ChatContainer/ChatBox/constants';
+import ChatHistorySidebar from '@/pageComponents/chat/slider/ChatSliderSidebar';
+import ChatSliderMobileDrawer from '@/pageComponents/chat/slider/ChatSliderMobileDrawer';
+import { useMemoEnhance } from '@fastgpt/web/hooks/useMemoEnhance';
+import ChatLanguageSelector from '@/pageComponents/chat/LanguageSelector';
+import ChatWindowHeader from '@/pageComponents/chat/ChatWindow/ChatWindowHeader';
+import MyIcon from '@fastgpt/web/components/common/Icon';
+import ToolMenu from '@/pageComponents/chat/ToolMenu';
+import { mobileChatHeaderIconButtonStyle } from '@/pageComponents/chat/ChatWindow/headerIconButtonStyle';
+import Avatar from '@fastgpt/web/components/common/Avatar';
+import { getAppChatSourceKey } from '@/web/core/chat/utils';
+import { useAppChatGenerateStatusSync } from '@/pageComponents/chat/ChatWindow/useAppChatGenerateStatusSync';
+import { postMarkChatRead } from '@/web/core/chat/history/api';
+import { useSandboxEditor, useSandboxStatus } from '@/pageComponents/chat/SandboxEditor/hook';
+import type { GetHistoriesBodyType } from '@fastgpt/global/openapi/core/chat/history/api';
+import type { OutLinkBrandingType } from '@fastgpt/global/support/outLink/branding';
+import MyTooltip from '@fastgpt/web/components/common/MyTooltip';
+
+const logger = getLogger(LogCategories.MODULE.CHAT.ITEM);
+
+const CustomPluginRunBox = dynamic(() => import('@/pageComponents/chat/CustomPluginRunBox'));
+
+type Props = {
+  appId: string;
+  appName: string;
+  appIntro: string;
+  appAvatar: string;
+  shareId: string;
+  authToken: string;
+  customUid: string;
+  canDownloadSource: boolean;
+  isShowCite: boolean;
+  isShowFullText: boolean;
+  showRunningStatus: boolean;
+  showSkillReferences: boolean;
+};
+
+type BrandingPageProps = {
+  brandDismissed: boolean;
+  onDismissBrand: () => void;
+  brandSession: React.MutableRefObject<ShareBrandSession>;
+};
+
+const OutLink = (props: Props & BrandingPageProps) => {
+  const { t } = useSafeTranslation();
   const router = useRouter();
   const {
     shareId = '',
-    chatId = '',
     showHistory = '1',
+    showHead = '1',
     authToken,
+    customUid,
+    showWorkorder,
+    hideMenu = '0',
     ...customVariables
   } = router.query as {
     shareId: string;
-    chatId: string;
     showHistory: '0' | '1';
+    showHead: '0' | '1';
     authToken: string;
+    showWorkorder: '0' | '1';
+    hideMenu: '0' | '1';
     [key: string]: string;
   };
-  const { toast } = useToast();
-  const { isOpen: isOpenSlider, onClose: onCloseSlider, onOpen: onOpenSlider } = useDisclosure();
-  const { isPc } = useSystemStore();
-  const ChatBoxRef = useRef<ComponentRef>(null);
-  const forbidRefresh = useRef(false);
-  const initSign = useRef(false);
-  const [isEmbed, setIdEmbed] = useState(true);
+  const { isPc } = useSystem();
+  const { outLinkAuthData, appId, chatId } = useChatStore();
 
-  const { localUId } = useShareChatStore();
-  const {
-    histories,
-    loadHistories,
-    pushHistory,
-    updateHistory,
-    delOneHistory,
-    chatData,
-    setChatData,
-    delOneHistoryItem,
-    clearHistories
-  } = useChatStore();
-  const appId = chatData.appId;
-  const outLinkUid: string = authToken || localUId;
+  // Remove empty value field
+  const formatedCustomVariables = useMemo(() => {
+    return Object.fromEntries(Object.entries(customVariables).filter(([_, value]) => value !== ''));
+  }, [customVariables]);
+
+  const forbidLoadChatRef = useContextSelector(ChatContext, (v) => v.forbidLoadChat);
+  const onChangeChatId = useContextSelector(ChatContext, (v) => v.onChangeChatId);
+  const onOpenSlider = useContextSelector(ChatContext, (v) => v.onOpenSlider);
+  const onCloseSlider = useContextSelector(ChatContext, (v) => v.onCloseSlider);
+
+  const resetVariables = useContextSelector(ChatItemContext, (v) => v.resetVariables);
+  const clearChatRecords = useContextSelector(ChatItemContext, (v) => v.clearChatRecords);
+  const isPlugin = useContextSelector(ChatItemContext, (v) => v.isPlugin);
+  const chatBoxData = useContextSelector(ChatItemContext, (v) => v.chatBoxData);
+  const setChatBoxData = useContextSelector(ChatItemContext, (v) => v.setChatBoxData);
+  const datasetCiteData = useContextSelector(ChatItemContext, (v) => v.datasetCiteData);
+  const setCiteModalData = useContextSelector(ChatItemContext, (v) => v.setCiteModalData);
+  const isShowCite = useContextSelector(ChatItemContext, (v) => v.isShowCite);
+
+  const chatRecords = useContextSelector(ChatRecordContext, (v) => v.chatRecords);
+  const isChatRecordsLoaded = useContextSelector(ChatRecordContext, (v) => v.isChatRecordsLoaded);
+  const onChatGenerateStatusChange = useAppChatGenerateStatusSync();
+  const currentHistory = useContextSelector(ChatContext, (v) =>
+    v.histories.find((item) => item.chatId === chatId && item.appId === appId)
+  );
+  const chatWindowTitle = getDisplayHistoryTitle({
+    customTitle: currentHistory?.customTitle,
+    title: chatBoxData.title,
+    fallbackTitle: t('common:core.chat.New Chat')
+  });
+
+  const initSign = useRef(false);
+  const [branding, setBranding] = useState<OutLinkBrandingType>();
+  const { data, loading } = useRequest(
+    async () => {
+      const shareId = outLinkAuthData?.shareId;
+      const outLinkUid = outLinkAuthData?.outLinkUid;
+      if (!outLinkUid || !shareId || forbidLoadChatRef.current) return;
+
+      const res = await getInitOutLinkChatInfo({
+        chatId,
+        outLinkAuthData: {
+          shareId,
+          outLinkUid
+        }
+      });
+
+      setChatBoxData({
+        ...res,
+        appId,
+        sourceKey: getAppChatSourceKey(appId)
+      });
+
+      resetVariables({
+        variables: {
+          ...formatedCustomVariables,
+          ...res.variables
+        },
+        variableList: res.app?.chatConfig?.variables
+      });
+
+      return res;
+    },
+    {
+      manual: false,
+      refreshDeps: [shareId, outLinkAuthData, chatId],
+      onSuccess(res) {
+        // 补写 chatId 时会跳过初始化；只用有效响应更新品牌，避免 undefined 清空展示状态。
+        if (res) setBranding(res.branding);
+      },
+      onFinally() {
+        forbidLoadChatRef.current = false;
+      }
+    }
+  );
+  const showChatContainer = !datasetCiteData || isPc;
+  const showBrand = branding?.enabled === true && branding.showBrand && !props.brandDismissed;
+  // 品牌跟随页面的桌面/移动断点，避免侧栏挤压聊天区后混入移动端布局。
+  const narrowBrand = showBrand && !isPc;
+  const wideBrand = showBrand && isPc;
+  const complianceTipPlacement = narrowBrand ? 'external' : 'default';
+  const headerBrand = wideBrand ? (
+    <ShareBrand
+      narrow={false}
+      session={props.brandSession}
+      outLinkAuthData={outLinkAuthData}
+      onDismiss={props.onDismissBrand}
+    />
+  ) : undefined;
+
+  const mobileHeaderAppName = props.appName || data?.app?.name || chatBoxData.app.name;
+  const mobileHeaderAppAvatar = props.appAvatar || data?.app?.avatar || chatBoxData.app.avatar;
+  const isShareAuthReady = !!outLinkAuthData?.shareId && !!outLinkAuthData?.outLinkUid;
+  const { SandboxEntryIcon } = useSandboxStatus({
+    appId: isShareAuthReady ? appId : '',
+    chatId,
+    outLinkAuthData,
+    enabled: isShareAuthReady
+  });
+  const { SandboxEditorModal, onOpenSandboxModal } = useSandboxEditor({
+    appId,
+    chatId,
+    outLinkAuthData,
+    enabled: isShareAuthReady
+  });
+
+  useEffect(() => {
+    if (initSign.current === false && data && isChatRecordsLoaded) {
+      initSign.current = true;
+      if (window !== top) {
+        window.top?.postMessage({ type: 'shareChatReady' }, '*');
+      }
+    }
+  }, [data, isChatRecordsLoaded]);
 
   const startChat = useCallback(
-    async ({ messages, controller, generatingMessage, variables }: StartChatFnProps) => {
-      const prompts = messages.slice(-2);
-      const completionChatId = chatId ? chatId : nanoid();
+    async ({
+      messages,
+      controller,
+      generatingMessage,
+      variables,
+      responseChatItemId
+    }: StartChatFnProps) => {
+      const completionChatId = chatId || getNanoid();
+      const histories = messages.slice(-1);
 
-      const { responseText, responseData } = await streamFetch({
+      //post message to report chat start
+      window.top?.postMessage(
+        {
+          type: 'shareChatStart',
+          data: {
+            question: histories[0]?.content
+          }
+        },
+        '*'
+      );
+
+      const { responseText } = await streamFetch({
         data: {
-          messages: prompts,
+          messages: histories,
           variables: {
-            ...customVariables,
-            ...variables
+            ...variables,
+            ...customVariables
           },
-          shareId,
+          responseChatItemId,
           chatId: completionChatId,
-          outLinkUid
+          outLinkAuthData,
+          retainDatasetCite: isShowCite,
+          showSkillReferences: props.showSkillReferences
         },
         onMessage: generatingMessage,
         abortCtrl: controller
       });
 
-      const newTitle = getChatTitleFromChatMessage(GPTMessages2Chats(prompts)[0]);
-
       // new chat
       if (completionChatId !== chatId) {
-        const newHistory: ChatHistoryItemType = {
-          chatId: completionChatId,
-          updateTime: new Date(),
-          title: newTitle,
-          appId,
-          top: false
-        };
-        pushHistory(newHistory);
-        if (controller.signal.reason !== 'leave') {
-          forbidRefresh.current = true;
-          router.replace({
-            query: {
-              ...router.query,
-              chatId: completionChatId
-            }
-          });
-        }
-      } else {
-        // update chat
-        const currentChat = histories.find((item) => item.chatId === chatId);
-        currentChat &&
-          updateHistory({
-            ...currentChat,
-            updateTime: new Date(),
-            title: newTitle,
-            shareId,
-            outLinkUid
-          });
+        onChangeChatId(completionChatId, true);
       }
 
-      // update chat window
-      setChatData((state) => ({
-        ...state,
-        title: newTitle,
-        history: ChatBoxRef.current?.getChatHistories() || state.history
-      }));
-
-      /* post message to report result */
-      const result: ChatSiteItemType[] = GPTMessages2Chats(prompts).map((item) => ({
-        ...item,
-        status: 'finish'
-      }));
-
+      // hook message
       window.top?.postMessage(
         {
           type: 'shareChatFinish',
           data: {
-            question: result[0]?.value,
+            question: histories[0]?.content,
             answer: responseText
           }
         },
         '*'
       );
 
-      return { responseText, responseData, isNewChat: forbidRefresh.current };
+      return { responseText, isNewChat: forbidLoadChatRef.current };
     },
     [
       chatId,
       customVariables,
-      shareId,
-      outLinkUid,
-      setChatData,
-      appId,
-      pushHistory,
-      router,
-      histories,
-      updateHistory
+      outLinkAuthData,
+      isShowCite,
+      props.showSkillReferences,
+      forbidLoadChatRef,
+      onChangeChatId
     ]
   );
 
-  const loadChatInfo = useCallback(
-    async (shareId: string, chatId: string) => {
-      if (!shareId) return null;
-
-      try {
-        const res = await getInitOutLinkChatInfo({
-          chatId,
-          shareId,
-          outLinkUid
-        });
-        const history = res.history.map((item) => ({
-          ...item,
-          status: ChatStatusEnum.finish
-        }));
-
-        setChatData({
-          ...res,
-          history
-        });
-
-        ChatBoxRef.current?.resetHistory(history);
-        ChatBoxRef.current?.resetVariables(res.variables);
-
-        // send init message
-        if (!initSign.current) {
-          initSign.current = true;
-          if (window !== top) {
-            window.top?.postMessage({ type: 'shareChatReady' }, '*');
-          }
-        }
-
-        if (chatId && res.history.length > 0) {
-          setTimeout(() => {
-            ChatBoxRef.current?.scrollToBottom('auto');
-          }, 500);
-        }
-      } catch (e: any) {
-        console.log(e);
-        toast({
-          status: 'error',
-          title: getErrText(e, t('core.shareChat.Init Error'))
-        });
-        if (chatId) {
-          router.replace({
-            query: {
-              ...router.query,
-              chatId: ''
-            }
-          });
-        }
-      }
-
-      return null;
-    },
-    [outLinkUid, router, setChatData, t, toast]
-  );
-
-  const { isFetching } = useQuery(['init', shareId, chatId], () => {
-    if (forbidRefresh.current) {
-      forbidRefresh.current = false;
-      return null;
-    }
-
-    return loadChatInfo(shareId, chatId);
-  });
-
-  // load histories
-  useQuery(['loadHistories', outLinkUid, shareId], () => {
-    if (shareId && outLinkUid) {
-      return loadHistories({
-        shareId,
-        outLinkUid
-      });
-    }
-    return null;
-  });
-
   // window init
-  useEffect(() => {
+  const [isEmbed, setIdEmbed] = useState(true);
+  useMount(() => {
     setIdEmbed(window !== top);
-  }, []);
+  });
+
+  const RenderHistoryList = useMemo(() => {
+    // 语言入口跟随历史侧栏挂载：PC 放侧栏底部，移动端放抽屉底部且选择后关闭抽屉。
+    const footerSlot = (
+      <Box flexShrink={0} p={3} mt="auto">
+        <ChatLanguageSelector mode="share" onSelected={isPc ? undefined : onCloseSlider} />
+      </Box>
+    );
+
+    const Children = (
+      <ChatHistorySidebar
+        menuConfirmButtonText={t('chat:confirm_to_clear_share_chat_history')}
+        footerSlot={footerSlot}
+      />
+    );
+
+    if (showHistory !== '1') return null;
+
+    return isPc ? (
+      <SideBar externalTrigger={!!datasetCiteData}>{Children}</SideBar>
+    ) : (
+      <ChatSliderMobileDrawer
+        showHeader={false}
+        showFooter={false}
+        footerSlot={footerSlot}
+        menuConfirmButtonText={t('common:core.chat.Confirm to clear history')}
+      />
+    );
+  }, [isPc, datasetCiteData, onCloseSlider, showHistory, t]);
 
   return (
-    <PageContainer
-      {...(isEmbed
-        ? { p: '0 !important', insertProps: { borderRadius: '0', boxShadow: 'none' } }
-        : { p: [0, 5] })}
-    >
-      <Head>
-        <title>{appName || chatData.app?.name}</title>
-        <meta name="description" content={appIntro} />
-        <link rel="icon" href={appAvatar || chatData.app?.avatar} />
-      </Head>
-      <MyBox
-        isLoading={isFetching}
-        h={'100%'}
-        display={'flex'}
-        flexDirection={['column', 'row']}
-        bg={'white'}
+    <>
+      <NextHead
+        title={props.appName || data?.app?.name || 'AI'}
+        desc={props.appIntro || data?.app?.intro}
+        icon={props.appAvatar || data?.app?.avatar}
+      />
+      <Flex
+        h={'full'}
+        minH={0}
+        minW={0}
+        gap={datasetCiteData ? 0 : 4}
+        {...(isEmbed ? { p: '0 !important', borderRadius: '0', boxShadow: 'none' } : { p: [0, 5] })}
       >
-        {showHistory === '1'
-          ? ((children: React.ReactNode) => {
-              return isPc ? (
-                <SideBar>{children}</SideBar>
-              ) : (
-                <Drawer
-                  isOpen={isOpenSlider}
-                  placement="left"
-                  autoFocus={false}
-                  size={'xs'}
-                  onClose={onCloseSlider}
-                >
-                  <DrawerOverlay backgroundColor={'rgba(255,255,255,0.5)'} />
-                  <DrawerContent maxWidth={'250px'} boxShadow={'2px 0 10px rgba(0,0,0,0.15)'}>
-                    {children}
-                  </DrawerContent>
-                </Drawer>
-              );
-            })(
-              <ChatHistorySlider
-                appName={chatData.app.name}
-                appAvatar={chatData.app.avatar}
-                confirmClearText={t('core.chat.Confirm to clear share chat history')}
-                activeChatId={chatId}
-                history={histories.map((item) => ({
-                  id: item.chatId,
-                  title: item.title,
-                  customTitle: item.customTitle,
-                  top: item.top
-                }))}
-                onClose={onCloseSlider}
-                onChangeChat={(chatId) => {
-                  router.replace({
-                    query: {
-                      ...router.query,
-                      chatId: chatId || ''
-                    }
-                  });
-                  if (!isPc) {
-                    onCloseSlider();
+        {showChatContainer && (
+          <PageContainer
+            flex={'1 0 0'}
+            w={0}
+            minH={0}
+            minW={0}
+            p={'0 !important'}
+            insertProps={
+              datasetCiteData
+                ? {
+                    borderRadius: [0, '16px 0 0 16px']
                   }
-                }}
-                onDelHistory={({ chatId }) =>
-                  delOneHistory({ appId: chatData.appId, chatId, shareId, outLinkUid })
-                }
-                onClearHistory={() => {
-                  clearHistories({ shareId, outLinkUid });
-                  router.replace({
-                    query: {
-                      ...router.query,
-                      chatId: ''
-                    }
-                  });
-                }}
-                onSetHistoryTop={(e) => {
-                  updateHistory({
-                    ...e,
-                    appId: chatData.appId,
-                    shareId,
-                    outLinkUid
-                  });
-                }}
-                onSetCustomTitle={async (e) => {
-                  updateHistory({
-                    appId: chatData.appId,
-                    chatId: e.chatId,
-                    title: e.title,
-                    customTitle: e.title,
-                    shareId,
-                    outLinkUid
-                  });
-                }}
-              />
-            )
-          : null}
+                : undefined
+            }
+          >
+            <Flex h={'100%'} minH={0} minW={0} flexDirection={['column', 'row']}>
+              {RenderHistoryList}
 
-        {/* chat container */}
-        <Flex
-          position={'relative'}
-          h={[0, '100%']}
-          w={['100%', 0]}
-          flex={'1 0 0'}
-          flexDirection={'column'}
-        >
-          {/* header */}
-          <ChatHeader
-            appAvatar={chatData.app.avatar}
-            appName={chatData.app.name}
-            history={chatData.history}
-            showHistory={showHistory === '1'}
-            onOpenSlider={onOpenSlider}
-          />
-          {/* chat box */}
-          <Box flex={1}>
-            <ChatBox
-              active={!!chatData.app.name}
-              ref={ChatBoxRef}
-              appAvatar={chatData.app.avatar}
-              userAvatar={chatData.userAvatar}
-              userGuideModule={chatData.app?.userGuideModule}
-              showFileSelector={checkChatSupportSelectFileByChatModels(chatData.app.chatModels)}
-              feedbackType={'user'}
-              onUpdateVariable={(e) => {}}
-              onStartChat={startChat}
-              onDelMessage={(e) =>
-                delOneHistoryItem({ ...e, appId: chatData.appId, chatId, shareId, outLinkUid })
-              }
-              appId={chatData.appId}
-              chatId={chatId}
-              shareId={shareId}
-              outLinkUid={outLinkUid}
+              {/* chat container */}
+              <Flex
+                bg="white"
+                position={'relative'}
+                h={[0, '100%']}
+                minH={0}
+                minW={0}
+                w={['100%', 0]}
+                flex={'1 0 0'}
+                flexDirection={'column'}
+              >
+                {/* header */}
+                <Box flexShrink={0}>
+                  {showHead === '1' &&
+                    !isPlugin &&
+                    (isPc ? (
+                      <ChatWindowHeader
+                        title={chatWindowTitle}
+                        history={chatRecords}
+                        chatType={ChatTypeEnum.share}
+                        rightActions={<SandboxEntryIcon onOpen={onOpenSandboxModal} />}
+                        endActions={headerBrand}
+                      />
+                    ) : (
+                      <Flex
+                        as="header"
+                        minH="48px"
+                        py={narrowBrand ? 2 : 0}
+                        px={4}
+                        bg="white"
+                        alignItems="center"
+                        justifyContent="space-between"
+                        color="myGray.600"
+                      >
+                        {showHistory === '1' ? (
+                          <IconButton
+                            aria-label="Open history"
+                            icon={
+                              <MyIcon
+                                name="core/chat/sidebar/menu"
+                                w="20px"
+                                h="20px"
+                                color="currentColor"
+                              />
+                            }
+                            variant="unstyled"
+                            {...mobileChatHeaderIconButtonStyle}
+                            onClick={onOpenSlider}
+                          />
+                        ) : (
+                          <Box minW="36px" />
+                        )}
+
+                        <Flex
+                          alignItems="center"
+                          minW={0}
+                          flex="1"
+                          justifyContent="center"
+                          flexDirection="column"
+                          px={3}
+                        >
+                          <Flex
+                            alignItems="center"
+                            justifyContent="center"
+                            minW={0}
+                            maxW="100%"
+                            gap={2}
+                          >
+                            {!!mobileHeaderAppAvatar && (
+                              <Avatar
+                                src={mobileHeaderAppAvatar}
+                                w="24px"
+                                h="24px"
+                                borderRadius="6px"
+                                flexShrink={0}
+                              />
+                            )}
+                            <MyTooltip label={mobileHeaderAppName} showOnlyWhenOverflow>
+                              <Box
+                                minW={0}
+                                fontSize="16px"
+                                fontWeight={500}
+                                color="myGray.900"
+                                overflow="hidden"
+                                whiteSpace="nowrap"
+                                textOverflow="clip"
+                              >
+                                {mobileHeaderAppName}
+                              </Box>
+                            </MyTooltip>
+                          </Flex>
+                          {narrowBrand && <ComplianceTip type="chat" pt={0} pb={0} />}
+                        </Flex>
+
+                        {hideMenu === '1' ? (
+                          <Box minW="36px" />
+                        ) : (
+                          <Box minW="36px">
+                            <ToolMenu
+                              history={chatRecords}
+                              reserveSpace={showWorkorder !== undefined}
+                              chatType={ChatTypeEnum.share}
+                            />
+                          </Box>
+                        )}
+                      </Flex>
+                    ))}
+                  {/* 无常规页头时仍保留品牌所在的 header 行，避免覆盖聊天内容。 */}
+                  {headerBrand && (isPlugin || showHead !== '1') && (
+                    <Flex as="header" h="56px" px={5} alignItems="center" justifyContent="flex-end">
+                      {headerBrand}
+                    </Flex>
+                  )}
+                  {narrowBrand && (showHead !== '1' || isPlugin) && (
+                    <Flex
+                      as="header"
+                      minH="48px"
+                      px={4}
+                      py={2}
+                      direction="column"
+                      alignItems="center"
+                      justifyContent="center"
+                    >
+                      <Box textAlign="center" fontWeight={500}>
+                        {mobileHeaderAppName}
+                      </Box>
+                      <ComplianceTip type="chat" pt={0} pb={0} />
+                    </Flex>
+                  )}
+                </Box>
+                {/* chat box */}
+                <Box flex={1} minH={0} minW={0} overflow={'hidden'} bg={'white'}>
+                  {isPlugin ? (
+                    <CustomPluginRunBox
+                      complianceTipPlacement={complianceTipPlacement}
+                      appId={appId}
+                      chatId={chatId}
+                      outLinkAuthData={outLinkAuthData}
+                      onNewChat={() => {
+                        clearChatRecords();
+                        onChangeChatId(getNanoid());
+                      }}
+                      onStartChat={startChat}
+                    />
+                  ) : (
+                    <ChatBox
+                      complianceTipPlacement={complianceTipPlacement}
+                      isReady={!loading}
+                      sourceTarget={{ sourceType: ChatSourceTypeEnum.app, sourceId: appId }}
+                      chatId={chatId}
+                      outLinkAuthData={outLinkAuthData}
+                      features={{
+                        autoResume: true,
+                        fbTypes: ['user'],
+                        workorder: showWorkorder === '1',
+                        quickReplies: true,
+                        inputGuide: true,
+                        voice: true,
+                        tts: true,
+                        sandbox: true
+                      }}
+                      onStartChat={startChat}
+                      onMarkChatRead={postMarkChatRead}
+                      onChatGenerateStatusChange={onChatGenerateStatusChange}
+                      chatType={ChatTypeEnum.share}
+                    />
+                  )}
+                </Box>
+                {narrowBrand && (
+                  <ShareBrand
+                    narrow
+                    session={props.brandSession}
+                    outLinkAuthData={outLinkAuthData}
+                    onDismiss={props.onDismissBrand}
+                  />
+                )}
+                <SandboxEditorModal />
+              </Flex>
+            </Flex>
+          </PageContainer>
+        )}
+
+        {datasetCiteData && (
+          <PageContainer
+            flex={'1 0 0'}
+            w={0}
+            maxW={'560px'}
+            p={'0 !important'}
+            insertProps={{
+              borderLeft: '1px solid',
+              borderLeftColor: 'myGray.200',
+              borderRadius: [0, '0 16px 16px 0']
+            }}
+          >
+            <ChatQuoteList
+              rawSearch={datasetCiteData.rawSearch}
+              metadata={datasetCiteData.metadata}
+              singleQuote={datasetCiteData.singleQuote}
+              onClose={() => setCiteModalData(undefined)}
             />
-          </Box>
-        </Flex>
-      </MyBox>
-    </PageContainer>
+          </PageContainer>
+        )}
+      </Flex>
+    </>
   );
 };
 
+const Render = (props: Props) => {
+  // 临时关闭和曝光去重属于页面生命周期，不随 chatId、历史或布局组件重建。
+  const [brandDismissed, setBrandDismissed] = useState(false);
+  const brandSession = useRef<ShareBrandSession>({ exposed: false, eventId: getNanoid(24) });
+  const { t } = useSafeTranslation();
+  const { toast } = useToast();
+  const { shareId, authToken, customUid, appId } = props;
+  const { localUId, setLocalUId, loaded } = useShareChatStore();
+  const {
+    source,
+    chatId,
+    appId: chatStoreAppId,
+    setSource,
+    setAppId,
+    setOutLinkAuthData,
+    loaded: chatStoreLoaded
+  } = useChatStore();
+
+  const outLinkUid = authToken || customUid || localUId || '';
+  const chatHistoryProviderParams = useMemoEnhance<GetHistoriesBodyType>(() => {
+    return {
+      outLinkAuthData: {
+        shareId,
+        outLinkUid
+      }
+    };
+  }, [outLinkUid, shareId]);
+  const outLinkAuthData = useMemoEnhance(() => {
+    return {
+      shareId,
+      outLinkUid
+    };
+  }, [outLinkUid, shareId]);
+  const chatRecordProviderParams = useMemoEnhance(() => {
+    return {
+      outLinkAuthData,
+      chatId,
+      type: GetChatTypeEnum.outLink
+    };
+  }, [outLinkAuthData, chatId]);
+
+  useEffect(() => {
+    if (!chatStoreLoaded) return;
+
+    setSource('share');
+  }, [chatStoreLoaded, setSource]);
+
+  // Set default localUId
+  useEffect(() => {
+    if (loaded) {
+      if (!localUId) {
+        setLocalUId(`shareChat-${Date.now()}-${getNanoid(24)}`);
+      }
+    }
+  }, [loaded, localUId, setLocalUId]);
+
+  // Init outLinkAuthData
+  useEffect(() => {
+    if (!chatStoreLoaded || !outLinkAuthData.outLinkUid) return;
+
+    setOutLinkAuthData(outLinkAuthData);
+    return () => {
+      setOutLinkAuthData();
+    };
+  }, [chatStoreLoaded, outLinkAuthData, setOutLinkAuthData]);
+
+  // Watch appId
+  useEffect(() => {
+    if (!chatStoreLoaded) return;
+
+    setAppId(appId);
+  }, [appId, chatStoreLoaded, setAppId]);
+  useMount(() => {
+    if (!appId) {
+      toast({
+        status: 'warning',
+        title: t('chat:invalid_share_url')
+      });
+    }
+  });
+
+  const isCurrentChatLinkReady =
+    chatStoreLoaded &&
+    source === ChatSourceEnum.share &&
+    chatStoreAppId === appId &&
+    outLinkAuthData.shareId === shareId &&
+    outLinkAuthData.outLinkUid === outLinkUid &&
+    !!appId &&
+    !!outLinkUid;
+
+  return isCurrentChatLinkReady ? (
+    <ChatContextProvider params={chatHistoryProviderParams}>
+      <ChatItemContextProvider
+        showRouteToDatasetDetail={false}
+        showWholeResponse={false}
+        canDownloadSource={props.canDownloadSource}
+        isShowCite={props.isShowCite}
+        isShowFullText={props.isShowFullText}
+        showRunningStatus={props.showRunningStatus}
+        showSkillReferences={props.showSkillReferences}
+      >
+        <ChatRecordContextProvider params={chatRecordProviderParams}>
+          {/* 分享身份切换时重建页面状态，避免沿用旧品牌或接收旧身份的初始化结果。 */}
+          <OutLink
+            key={JSON.stringify([shareId, outLinkUid])}
+            {...props}
+            brandDismissed={brandDismissed}
+            onDismissBrand={() => setBrandDismissed(true)}
+            brandSession={brandSession}
+          />
+        </ChatRecordContextProvider>
+      </ChatItemContextProvider>
+    </ChatContextProvider>
+  ) : (
+    <NextHead title={props.appName} desc={props.appIntro} icon={props.appAvatar} />
+  );
+};
+
+export default React.memo(Render);
+
+/** Load public share metadata without exposing other publishing channels. */
 export async function getServerSideProps(context: any) {
   const shareId = context?.query?.shareId || '';
+  const authToken = context?.query?.authToken || '';
+  const customUid = context?.query?.customUid || '';
 
   const app = await (async () => {
     try {
-      const app = (await MongoOutLink.findOne(
+      return MongoOutLink.findOne(
         {
-          shareId
+          shareId,
+          // 分享页只公开分享渠道，不能用其他渠道的 ID 读取应用信息。
+          type: PublishChannelEnum.share
         },
-        'appId'
+        'appId canDownloadSource showCite showFullText showRunningStatus showSkillReferences'
       )
-        .populate('appId', 'name avatar intro')
-        .lean()) as OutLinkWithAppType;
-      return app;
+        .populate<{ associatedApp: AppSchemaType }>('associatedApp', 'name avatar intro')
+        .lean();
     } catch (error) {
+      logger.error('getServerSideProps failed', {
+        error,
+        shareId
+      });
       return undefined;
     }
   })();
 
   return {
     props: {
-      appName: app?.appId?.name || '',
-      appAvatar: app?.appId?.avatar || '',
-      appIntro: app?.appId?.intro || '',
-      ...(await serviceSideProps(context))
+      appId: app?.appId ? String(app?.appId) : '',
+      appName: app?.associatedApp?.name ?? 'AI',
+      appAvatar: app?.associatedApp?.avatar ?? '',
+      appIntro: app?.associatedApp?.intro ?? 'AI',
+      canDownloadSource: app?.canDownloadSource ?? false,
+      isShowCite: app?.showCite ?? false,
+      isShowFullText: app?.showFullText ?? false,
+      showRunningStatus: app?.showRunningStatus ?? false,
+      showSkillReferences: app?.showSkillReferences ?? false,
+      shareId: shareId ?? '',
+      authToken: authToken ?? '',
+      customUid,
+      // 分享页同样挂载全局 Layout，预加载强制成员名弹窗所需的 namespace。
+      ...(await serviceSideProps(context, ['file', 'app', 'chat', 'workflow', 'account_team'], {
+        langCookieKey: SHARE_LANG_KEY,
+        fallbackLangCookieKey: LANG_KEY
+      }))
     }
   };
 }
-
-export default OutLink;

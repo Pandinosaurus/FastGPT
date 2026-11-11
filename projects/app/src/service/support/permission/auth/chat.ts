@@ -1,137 +1,54 @@
-import { ChatSchema } from '@fastgpt/global/core/chat/type';
-import { MongoChat } from '@fastgpt/service/core/chat/chatSchema';
-import { AuthModeType } from '@fastgpt/service/support/permission/type';
-import { authOutLink, authOutLinkInit } from './outLink';
-import { ChatErrEnum } from '@fastgpt/global/common/error/code/chat';
-import { authUserRole } from '@fastgpt/service/support/permission/auth/user';
-import { TeamMemberRoleEnum } from '@fastgpt/global/support/user/team/constant';
-import { authTeamSpaceToken } from './team';
-import { authCert } from '@fastgpt/service/support/permission/auth/common';
-import { authOutLinkValid } from '@fastgpt/service/support/permission/auth/outLink';
-import { AuthUserTypeEnum } from '@fastgpt/global/support/permission/constant';
-import { MongoTeamMember } from '@fastgpt/service/support/user/team/teamMemberSchema';
-import { OutLinkChatAuthProps } from '@fastgpt/global/support/permission/chat';
-/* 
-  outLink: Must be the owner
-  token: team owner and chat owner have all permissions
-*/
-export async function autChatCrud({
-  appId,
-  chatId,
-  shareId,
-  outLinkUid,
+import { MongoChatItem } from '@fastgpt/service/core/chat/chatItemSchema';
+import { DatasetErrEnum } from '@fastgpt/global/common/error/code/dataset';
+import { ChatRoleEnum, type ChatSourceTypeEnum } from '@fastgpt/global/core/chat/constants';
+import { buildChatSourceAggregateMatch } from '@fastgpt/service/core/chat/source';
 
-  teamId: spaceTeamId,
-  teamToken,
-  per = 'owner',
-  ...props
-}: AuthModeType & {
-  appId: string;
-  chatId?: string;
-  shareId?: string;
-  outLinkUid?: string;
+/**
+ * 校验文档是否来自当前会话引用。
+ *
+ * 只依赖 ChatItem 上的 citeCollectionIds 判断 collection 是否在当前会话中被引用，
+ * 避免读取和解析完整 responseData。
+ */
+export const authCollectionInChat = async ({
+  collectionIds,
+  sourceType,
+  sourceId,
+  chatId
+}: {
+  collectionIds: string[];
+  sourceType: ChatSourceTypeEnum;
+  sourceId: string;
+  chatId: string;
+}) => {
+  const targetCollectionIds = collectionIds.map(String);
 
-  teamId?: string;
-  teamToken?: string;
-}): Promise<{
-  chat?: ChatSchema;
-  isOutLink: boolean;
-  uid?: string;
-}> {
-  const isOutLink = Boolean((shareId || spaceTeamId) && outLinkUid);
-  if (!chatId) return { isOutLink, uid: outLinkUid };
-
-  const chat = await MongoChat.findOne({ appId, chatId }).lean();
-
-  const { uid } = await (async () => {
-    // outLink Auth
-    if (shareId && outLinkUid) {
-      const { uid } = await authOutLink({ shareId, outLinkUid });
-      if (!chat || (chat.shareId === shareId && chat.outLinkUid === uid)) {
-        return { uid };
+  const [authResult] = await MongoChatItem.aggregate<{ isAuthorized: boolean }>([
+    {
+      $match: {
+        ...buildChatSourceAggregateMatch({ sourceType, sourceId }),
+        chatId,
+        obj: ChatRoleEnum.AI
       }
-      return Promise.reject(ChatErrEnum.unAuthChat);
-    }
-    // auth team space chat
-    if (spaceTeamId && teamToken) {
-      const { uid } = await authTeamSpaceToken({ teamId: spaceTeamId, teamToken });
-      if (!chat || (String(chat.teamId) === String(spaceTeamId) && chat.outLinkUid === uid)) {
-        return { uid };
+    },
+    { $sort: { _id: -1 } },
+    { $limit: 50 },
+    { $unwind: '$citeCollectionIds' },
+    {
+      $group: {
+        _id: null,
+        citeCollectionIds: { $addToSet: { $toString: '$citeCollectionIds' } }
       }
-      return Promise.reject(ChatErrEnum.unAuthChat);
+    },
+    {
+      $project: {
+        _id: 0,
+        isAuthorized: { $setIsSubset: [targetCollectionIds, '$citeCollectionIds'] }
+      }
     }
+  ]);
 
-    if (!chat) return { id: outLinkUid };
-
-    //  auth req
-    const { teamId, tmbId, role } = await authUserRole(props);
-
-    if (String(teamId) !== String(chat.teamId)) return Promise.reject(ChatErrEnum.unAuthChat);
-
-    if (role === TeamMemberRoleEnum.owner) return { uid: outLinkUid };
-    if (String(tmbId) === String(chat.tmbId)) return { uid: outLinkUid };
-
-    // admin
-    if (per === 'r' && role === TeamMemberRoleEnum.admin) return { uid: outLinkUid };
-
-    return Promise.reject(ChatErrEnum.unAuthChat);
-  })();
-
-  if (!chat) return { isOutLink, uid };
-
-  return {
-    chat,
-    isOutLink,
-    uid
-  };
-}
-
-/* 
-  Different chat source
-  1. token (header)
-  2. apikey (header)
-  3. share page (body: shareId outLinkUid)
-  4. team chat page (body: teamId teamToken)
-*/
-export async function authChatCert(props: AuthModeType) {
-  const { teamId, teamToken, shareId, outLinkUid } = props.req.body as OutLinkChatAuthProps;
-
-  if (shareId && outLinkUid) {
-    const { shareChat } = await authOutLinkValid({ shareId });
-    const { uid } = await authOutLinkInit({
-      outLinkUid,
-      tokenUrl: shareChat.limit?.hookUrl
-    });
-
-    return {
-      teamId: String(shareChat.teamId),
-      tmbId: String(shareChat.tmbId),
-      authType: AuthUserTypeEnum.outLink,
-      apikey: '',
-      isOwner: false,
-      canWrite: false,
-      outLinkUid: uid
-    };
+  if (authResult?.isAuthorized) {
+    return;
   }
-  if (teamId && teamToken) {
-    const { uid } = await authTeamSpaceToken({ teamId, teamToken });
-    const tmb = await MongoTeamMember.findOne(
-      { teamId, role: TeamMemberRoleEnum.owner },
-      'tmbId'
-    ).lean();
-
-    if (!tmb) return Promise.reject(ChatErrEnum.unAuthChat);
-
-    return {
-      teamId,
-      tmbId: String(tmb._id),
-      authType: AuthUserTypeEnum.teamDomain,
-      apikey: '',
-      isOwner: false,
-      canWrite: false,
-      outLinkUid: uid
-    };
-  }
-
-  return authCert(props);
-}
+  return Promise.reject(DatasetErrEnum.unAuthDatasetFile);
+};

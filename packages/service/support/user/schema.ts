@@ -1,10 +1,16 @@
-import { connectionMongo, type Model } from '../../common/mongo';
-const { Schema, model, models } = connectionMongo;
+import { defineIndex, connectionMongo, getMongoModel } from '../../common/mongo';
+const { Schema } = connectionMongo;
 import { hashStr } from '@fastgpt/global/common/string/tools';
-import type { UserModelSchema } from '@fastgpt/global/support/user/type';
+import { UserTagsSchema, type UserModelSchema } from '@fastgpt/global/support/user/type';
 import { UserStatusEnum, userStatusMap } from '@fastgpt/global/support/user/constant';
+import { TeamMemberCollectionName } from '@fastgpt/global/support/user/team/constant';
+import { LangEnum } from '@fastgpt/global/common/i18n/type';
 
 export const userCollectionName = 'users';
+
+// 历史缺失、null 和空字符串必须保留为“无密码”，不能被哈希成有效摘要。
+const hashPasswordValue = (value: unknown) =>
+  typeof value === 'string' && value.length > 0 ? hashStr(value) : value;
 
 const UserSchema = new Schema({
   status: {
@@ -15,41 +21,19 @@ const UserSchema = new Schema({
   username: {
     // 可以是手机/邮箱，新的验证都只用手机
     type: String,
-    required: true,
-    unique: true // 唯一
-  },
-  email: {
-    type: String
-  },
-  phonePrefix: {
-    type: Number
-  },
-  phone: {
-    type: String
+    required: true
   },
   password: {
     type: String,
-    required: true,
-    set: (val: string) => hashStr(val),
-    get: (val: string) => hashStr(val),
+    required: false,
+    set: hashPasswordValue,
+    get: hashPasswordValue,
     select: false
   },
+  passwordUpdateTime: Date,
   createTime: {
     type: Date,
     default: () => new Date()
-  },
-  avatar: {
-    type: String,
-    default: '/icon/human.svg'
-  },
-  inviterId: {
-    // 谁邀请注册的
-    type: Schema.Types.ObjectId,
-    ref: 'user'
-  },
-  promotionRate: {
-    type: Number,
-    default: 15
   },
   openaiAccount: {
     type: {
@@ -61,19 +45,37 @@ const UserSchema = new Schema({
     type: String,
     default: 'Asia/Shanghai'
   },
+  language: {
+    type: String,
+    default: LangEnum.zh_CN
+  },
   lastLoginTmbId: {
-    type: Schema.Types.ObjectId
-  }
+    type: Schema.Types.ObjectId,
+    ref: TeamMemberCollectionName
+  },
+
+  fastgpt_sem: Object,
+
+  phonePrefix: Number,
+  contact: String,
+
+  tags: {
+    type: [String],
+    enum: UserTagsSchema.enum
+  },
+  meta: Object,
+  /** @deprecated */
+  avatar: String
 });
 
-try {
-  // login
-  UserSchema.index({ username: 1, password: 1 });
-  UserSchema.index({ createTime: -1 });
-} catch (error) {
-  console.log(error);
-}
+// username 唯一。
+defineIndex(UserSchema, {
+  key: { username: 1 },
+  options: { unique: true }
+});
+// 管理端用户列表按状态过滤并按 _id 倒序分页，复合索引可同时满足过滤和排序。
+defineIndex(UserSchema, { key: { status: 1, _id: -1 } });
+// Admin charts
+defineIndex(UserSchema, { key: { createTime: -1 } });
 
-export const MongoUser: Model<UserModelSchema> =
-  models[userCollectionName] || model(userCollectionName, UserSchema);
-MongoUser.syncIndexes();
+export const MongoUser = getMongoModel<UserModelSchema>(userCollectionName, UserSchema);

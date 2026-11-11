@@ -1,0 +1,138 @@
+import { getChatPublishSourceType } from '../../../common/chat/publishSource';
+import dayjs from 'dayjs';
+import { AppLogKeysEnum, AppLogTimespanEnum, DefaultAppLogKeys } from './constants';
+import { AppLogKeysSchema, type AppLogKeysType } from './type';
+import type { SourceMemberType } from '../../../support/user/type';
+import { ChatSourceEnum } from '../../chat/constants';
+
+/**
+ * 用户筛选「未选择」会同时传两个空数组。两者都省略才是不过滤。
+ */
+export const isUnselectedLogUserFilter = (tmbIds?: string[], outLinkUids?: string[]) =>
+  Array.isArray(tmbIds) &&
+  Array.isArray(outLinkUids) &&
+  tmbIds.length === 0 &&
+  outLinkUids.length === 0;
+
+/**
+ * 来源筛选「未选择」传空数组。省略才是不过滤，不能把空数组当成全部来源。
+ */
+export const isUnselectedLogSourceFilter = (source?: string[]) =>
+  Array.isArray(source) && source.length === 0;
+
+export const formatDateByTimespan = (timestamp: number, timespan: AppLogTimespanEnum) => {
+  const date = new Date(timestamp);
+
+  if (timespan === AppLogTimespanEnum.day) {
+    return {
+      date: dayjs(date).format('MM-DD'),
+      xLabel: dayjs(date).format('YYYY-MM-DD')
+    };
+  } else if (timespan === AppLogTimespanEnum.week) {
+    const startStr = dayjs(date).format('MM/DD');
+    const endStr = dayjs(date).add(6, 'day').format('MM/DD');
+
+    return {
+      date: `${startStr}-${endStr}`,
+      xLabel: `${startStr}-${endStr}`
+    };
+  } else if (timespan === AppLogTimespanEnum.month) {
+    return {
+      date: dayjs(date).format('YYYY-MM'),
+      xLabel: dayjs(date).format('YYYY-MM')
+    };
+  } else {
+    const year = date.getFullYear();
+    const quarter = Math.ceil((date.getMonth() + 1) / 3);
+    return {
+      date: `${year}Q${quarter}`,
+      xLabel: `${year}Q${quarter}`
+    };
+  }
+};
+
+export const calculateOffsetDates = (
+  start: Date,
+  end: Date,
+  offset: number,
+  timespan: AppLogTimespanEnum
+) => {
+  const offsetStart = new Date(start);
+  const offsetEnd = new Date(end);
+
+  if (timespan === AppLogTimespanEnum.quarter) {
+    offsetStart.setMonth(offsetStart.getMonth() + offset * 3);
+    offsetEnd.setMonth(offsetEnd.getMonth() + offset * 3);
+  } else if (timespan === AppLogTimespanEnum.month) {
+    offsetStart.setMonth(offsetStart.getMonth() + offset);
+    offsetEnd.setMonth(offsetEnd.getMonth() + offset);
+  } else if (timespan === AppLogTimespanEnum.week) {
+    offsetStart.setDate(offsetStart.getDate() + offset * 7);
+    offsetEnd.setDate(offsetEnd.getDate() + offset * 7);
+  } else {
+    offsetStart.setDate(offsetStart.getDate() + offset);
+    offsetEnd.setDate(offsetEnd.getDate() + offset);
+  }
+
+  return { offsetStart, offsetEnd };
+};
+
+/** 保留个人/团队已选列的顺序与开关，只补齐缺失列；新增鉴权者默认关闭。 */
+export const normalizeAppLogKeys = (keys?: unknown): AppLogKeysType[] => {
+  const result: AppLogKeysType[] = [];
+  const seen = new Set<AppLogKeysEnum>();
+  if (Array.isArray(keys)) {
+    keys.forEach((item) => {
+      const parsed = AppLogKeysSchema.safeParse(item);
+      if (!parsed.success || seen.has(parsed.data.key)) return;
+      seen.add(parsed.data.key);
+      result.push(parsed.data);
+    });
+  }
+  DefaultAppLogKeys.forEach((item) => {
+    if (seen.has(item.key)) return;
+    const sourceIndex = result.findIndex(({ key }) => key === AppLogKeysEnum.SOURCE);
+    if (item.key === AppLogKeysEnum.PUBLISH_SOURCE_TYPE && sourceIndex >= 0) {
+      result.splice(sourceIndex, 0, { ...item });
+      return;
+    }
+    const userIndex = result.findIndex(({ key }) => key === AppLogKeysEnum.USER);
+    if (item.key === AppLogKeysEnum.AUTH_USER && userIndex >= 0) {
+      result.splice(userIndex + 1, 0, { ...item });
+    } else {
+      result.push({ ...item });
+    }
+  });
+  return result;
+};
+
+/** 分享访客使用已解析的团队成员信息，API customUid 保留原值；鉴权者始终取 tmbId。 */
+export const getLogIdentity = ({
+  tmbId,
+  outLinkUid,
+  source,
+  publishSource,
+  sourceMember,
+  authMember,
+  isAuthorizer = false
+}: {
+  tmbId?: string | null;
+  outLinkUid?: string | null;
+  source?: string | null;
+  publishSource?: { type?: string | null } | null;
+  sourceMember?: SourceMemberType | null;
+  authMember?: SourceMemberType | null;
+  isAuthorizer?: boolean;
+}): { name: string; member?: SourceMemberType } => {
+  if (!isAuthorizer && outLinkUid) {
+    if (
+      getChatPublishSourceType({ source, publishSource }) === ChatSourceEnum.share &&
+      sourceMember
+    ) {
+      return { name: sourceMember.name, member: sourceMember };
+    }
+    return { name: outLinkUid };
+  }
+  if (authMember) return { name: authMember.name, member: authMember };
+  return { name: tmbId || '-' };
+};

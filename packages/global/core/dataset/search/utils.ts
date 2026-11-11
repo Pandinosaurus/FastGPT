@@ -1,10 +1,30 @@
-import { countPromptTokens } from '../../../common/string/tiktoken';
 import { SearchScoreTypeEnum } from '../constants';
-import { SearchDataResponseItemType } from '../type';
+import { type SearchDataResponseItemType } from '../type';
+
+/** 重排候选数的边界、步长与默认值；UI 与服务端共用，避免两处漂移。 */
+export const rerankCandidateNumRange = {
+  min: 10,
+  max: 100,
+  step: 10,
+  default: 100
+} as const;
+
+/** 仅接受范围内的整数；缺失、非有限数、小数和越界值统一回退默认值，避免中断检索。 */
+export const normalizeRerankCandidateNum = (value?: number | null) => {
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < rerankCandidateNumRange.min ||
+    value > rerankCandidateNumRange.max
+  ) {
+    return rerankCandidateNumRange.default;
+  }
+  return value;
+};
 
 /* dataset search result concat */
 export const datasetSearchResultConcat = (
-  arr: { k: number; list: SearchDataResponseItemType[] }[]
+  arr: { weight: number; list: SearchDataResponseItemType[] }[]
 ): SearchDataResponseItemType[] => {
   arr = arr.filter((item) => item.list.length > 0);
 
@@ -15,12 +35,11 @@ export const datasetSearchResultConcat = (
 
   // rrf
   arr.forEach((item) => {
-    const k = item.k;
+    const weight = item.weight;
 
     item.list.forEach((data, index) => {
       const rank = index + 1;
-      const score = 1 / (k + rank);
-
+      const score = weight * (1 / (60 + rank));
       const record = map.get(data.id);
       if (record) {
         // 合并两个score,有相同type的score,取最大值
@@ -30,7 +49,7 @@ export const datasetSearchResultConcat = (
           if (sameScore) {
             sameScore.value = Math.max(sameScore.value, dataItem.value);
           } else {
-            concatScore.push(dataItem);
+            concatScore.push({ ...dataItem });
           }
         }
 
@@ -42,6 +61,9 @@ export const datasetSearchResultConcat = (
       } else {
         map.set(data.id, {
           ...data,
+          // score 逐项复制：下面合并取最大值、回写 rrf 分数和名次都只改结果自己的对象，
+          // 不能改到调用方传入的列表（重排前的召回快照会和它共用同一批 score 对象）
+          score: data.score.map((item) => ({ ...item })),
           rrfScore: score
         });
       }
@@ -66,30 +88,7 @@ export const datasetSearchResultConcat = (
       });
     }
 
-    // @ts-ignore
-    delete item.rrfScore;
-    return item;
+    const { rrfScore: _, ...result } = item;
+    return result;
   });
-};
-
-export const filterSearchResultsByMaxChars = (
-  list: SearchDataResponseItemType[],
-  maxTokens: number
-) => {
-  const results: SearchDataResponseItemType[] = [];
-  let totalTokens = 0;
-
-  for (let i = 0; i < list.length; i++) {
-    const item = list[i];
-    totalTokens += countPromptTokens(item.q + item.a);
-    if (totalTokens > maxTokens + 500) {
-      break;
-    }
-    results.push(item);
-    if (totalTokens > maxTokens) {
-      break;
-    }
-  }
-
-  return results.length === 0 ? list.slice(0, 1) : results;
 };

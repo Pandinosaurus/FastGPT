@@ -1,166 +1,122 @@
-import type { FastGPTFeConfigsType } from '@fastgpt/global/common/system/types/index.d';
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { jsonRes } from '@fastgpt/service/common/response';
-import { readFileSync, readdirSync } from 'fs';
-import type { InitDateResponse } from '@/global/common/api/systemRes';
-import type { FastGPTConfigFileType } from '@fastgpt/global/common/system/types/index.d';
-import { PluginSourceEnum } from '@fastgpt/global/core/plugin/constants';
-import { getFastGPTConfigFromDB } from '@fastgpt/service/common/system/config/controller';
-import { connectToDatabase } from '@/service/mongo';
-import { PluginTemplateType } from '@fastgpt/global/core/plugin/type';
-import { readConfigData } from '@/service/common/system';
-import { exit } from 'process';
-import { FastGPTProUrl } from '@fastgpt/service/common/system/constants';
-import { initFastGPTConfig } from '@fastgpt/service/common/system/tools';
+import type { NextApiResponse } from 'next';
+import { type ApiRequestProps } from '@fastgpt/next/type';
+import { NextAPI } from '@/service/middleware/entry';
+import { authCert } from '@fastgpt/service/support/permission/auth/common';
+import { parseApiInput } from '@fastgpt/service/common/zod/requestParseError';
+import {
+  GetSystemInitDataQuerySchema,
+  GetSystemInitDataResponseSchema,
+  type GetSystemInitDataResponse
+} from '@fastgpt/global/openapi/common/system/api';
+import { getRuntimeSubPlansConfig } from '@fastgpt/global/support/wallet/sub/utils';
+import { serviceEnv } from '@fastgpt/service/env';
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  await getInitConfig();
+/** 按会话鉴权返回初始化数据；匿名白名单覆盖登录、价格和分享聊天的公共依赖。 */
+async function handler(
+  req: ApiRequestProps,
+  _res: NextApiResponse
+): Promise<GetSystemInitDataResponse> {
+  const { bufferId, includeSubPlans } = parseApiInput({
+    req,
+    querySchema: GetSystemInitDataQuerySchema
+  }).query;
+  const subPlans = getRuntimeSubPlansConfig(global.subPlans);
 
-  jsonRes<InitDateResponse>(res, {
-    data: {
-      feConfigs: global.feConfigs,
-      subPlans: global.subPlans,
-      llmModels: global.llmModels,
-      vectorModels: global.vectorModels,
-      reRankModels:
-        global.reRankModels?.map((item) => ({
-          ...item,
-          requestUrl: '',
-          requestAuth: ''
-        })) || [],
-      whisperModel: global.whisperModel,
-      audioSpeechModels: global.audioSpeechModels,
-      systemVersion: global.systemVersion || '0.0.0'
-    }
-  });
-}
+  /**
+   * 登录后返回 Schema 声明的公开配置；匿名统一投影公共页面实际使用的字段。
+   * 响应 Schema 同时过滤顶层及嵌套对象的未知字段，避免扩展配置泄漏。
+   */
+  const filterFeConfigs = (isAuthenticated: boolean): GetSystemInitDataResponse['feConfigs'] => {
+    const config = {
+      ...global.feConfigs,
+      // 每次响应直接读取环境变量，忽略文件、数据库和热更新配置中的同名字段。
+      showAuxiliaryGenerationRunDetail: serviceEnv.AUXILIARY_GENERATION_SHOW_RUN_DETAIL,
+      sso: (() => {
+        if (!global.feConfigs.sso && !global.systemEnv?.sso?.url) return undefined;
+        // 地址及启用状态以服务端连接配置为准，不能信任存储的前端能力标志。
+        return { ...global.feConfigs.sso, enabled: Boolean(global.systemEnv?.sso?.url) };
+      })()
+    };
+    if (isAuthenticated) return config;
 
-const defaultFeConfigs: FastGPTFeConfigsType = {
-  show_emptyChat: true,
-  show_git: true,
-  docUrl: 'https://doc.fastgpt.in',
-  openAPIDocUrl: 'https://doc.fastgpt.in/docs/development/openapi',
-  systemTitle: 'FastGPT',
-  concatMd:
-    '项目开源地址: [FastGPT GitHub](https://github.com/labring/FastGPT)\n交流群: ![](https://oss.laf.run/htr4n1-images/fastgpt-qr-code.jpg)',
-  limit: {
-    exportDatasetLimitMinutes: 0,
-    websiteSyncLimitMinuted: 0
-  },
-  scripts: [],
-  favicon: '/favicon.ico',
-  uploadFileMaxSize: 500
-};
+    const commonConfig = {
+      systemTitle: config.systemTitle,
+      favicon: config.favicon,
+      scripts: config.scripts,
+      isPlus: config.isPlus,
+      // 共享布局、登录政策链接和插件模型参数帮助共用文档地址。
+      docUrl: config.docUrl
+    };
+    const loginConfig = {
+      login_method: config.login_method,
+      register_method: config.register_method,
+      find_password_method: config.find_password_method,
+      loginGuideDocUrl: config.loginGuideDocUrl,
+      chineseRedirectUrl: config.chineseRedirectUrl,
+      wecomLoginAutoRedirect: config.wecomLoginAutoRedirect,
+      sso: config.sso,
+      oauth: config.oauth
+    };
+    const uploadConfig = {
+      limit: config.limit && {
+        uploadFileMaxAmount: config.limit?.uploadFileMaxAmount,
+        uploadFileMaxSize: config.limit?.uploadFileMaxSize
+      }
+    };
+    const chatConfig = {
+      show_compliance_copywriting: config.show_compliance_copywriting,
+      // 分享插件表单可选择模型，这个开关只控制系统模型标签的展示。
+      enable_team_model: config.enable_team_model
+    };
 
-export async function getInitConfig() {
-  if (global.systemInitd) return;
-  global.systemInitd = true;
-
-  try {
-    await connectToDatabase();
-
-    await Promise.all([
-      initSystemConfig(),
-      // getSimpleModeTemplates(),
-      getSystemVersion(),
-      getSystemPlugin()
-    ]);
-
-    console.log({
-      communityPlugins: global.communityPlugins
-    });
-  } catch (error) {
-    console.error('Load init config error', error);
-    global.systemInitd = false;
-
-    if (!global.feConfigs) {
-      exit(1);
-    }
-  }
-}
-
-export async function initSystemConfig() {
-  // load config
-  const [dbConfig, fileConfig] = await Promise.all([
-    getFastGPTConfigFromDB(),
-    readConfigData('config.json')
-  ]);
-  const fileRes = JSON.parse(fileConfig) as FastGPTConfigFileType;
-
-  // get config from database
-  const config: FastGPTConfigFileType = {
-    feConfigs: {
-      ...fileRes?.feConfigs,
-      ...defaultFeConfigs,
-      ...(dbConfig.feConfigs || {}),
-      isPlus: !!FastGPTProUrl
-    },
-    systemEnv: {
-      ...fileRes.systemEnv,
-      ...(dbConfig.systemEnv || {})
-    },
-    subPlans: dbConfig.subPlans || fileRes.subPlans,
-    llmModels: dbConfig.llmModels || fileRes.llmModels || [],
-    vectorModels: dbConfig.vectorModels || fileRes.vectorModels || [],
-    reRankModels: dbConfig.reRankModels || fileRes.reRankModels || [],
-    audioSpeechModels: dbConfig.audioSpeechModels || fileRes.audioSpeechModels || [],
-    whisperModel: dbConfig.whisperModel || fileRes.whisperModel
+    // 所有匿名入口共用同一白名单，页面切换无需补取配置。
+    return { ...commonConfig, ...loginConfig, ...uploadConfig, ...chatConfig };
   };
 
-  // set config
-  initFastGPTConfig(config);
+  // 只有鉴权失败才降级为匿名响应，配置处理错误仍交给 API 中间件报告。
+  const isAuthenticated = await authCert({ req, authToken: true })
+    .then(() => true)
+    .catch(() => false);
+  const feConfigs = filterFeConfigs(isAuthenticated);
 
-  console.log({
-    feConfigs: global.feConfigs,
-    systemEnv: global.systemEnv,
-    subPlans: global.subPlans,
-    llmModels: global.llmModels,
-    vectorModels: global.vectorModels,
-    reRankModels: global.reRankModels,
-    audioSpeechModels: global.audioSpeechModels,
-    whisperModel: global.whisperModel
-  });
-}
+  const response = (() => {
+    if (isAuthenticated) {
+      if (bufferId && global.systemInitBufferId && global.systemInitBufferId === bufferId) {
+        return {
+          bufferId: global.systemInitBufferId,
+          feConfigs,
+          systemVersion: global.systemVersion,
+          ...(includeSubPlans && { subPlans })
+        };
+      }
 
-export function getSystemVersion() {
-  if (global.systemVersion) return;
-  try {
-    if (process.env.NODE_ENV === 'development') {
-      global.systemVersion = process.env.npm_package_version || '0.0.0';
-    } else {
-      const packageJson = JSON.parse(readFileSync('/app/package.json', 'utf-8'));
-
-      global.systemVersion = packageJson?.version;
+      return {
+        bufferId: global.systemInitBufferId,
+        feConfigs,
+        subPlans,
+        systemVersion: global.systemVersion
+      };
     }
-    console.log(`System Version: ${global.systemVersion}`);
-  } catch (error) {
-    console.log(error);
 
-    global.systemVersion = '0.0.0';
-  }
-}
+    // 白名单改变时升级版本，强制旧匿名缓存重新获取过滤后的配置。
+    const unAuthBufferId = global.systemInitBufferId
+      ? `unAuth_v9_${global.systemInitBufferId}`
+      : '';
+    if (bufferId && unAuthBufferId === bufferId) {
+      return {
+        bufferId: unAuthBufferId,
+        ...(includeSubPlans && { subPlans })
+      };
+    }
 
-function getSystemPlugin() {
-  if (global.communityPlugins && global.communityPlugins.length > 0) return;
-
-  const basePath =
-    process.env.NODE_ENV === 'development' ? 'data/pluginTemplates' : '/app/data/pluginTemplates';
-  // read data/pluginTemplates directory, get all json file
-  const files = readdirSync(basePath);
-  // filter json file
-  const filterFiles = files.filter((item) => item.endsWith('.json'));
-
-  // read json file
-  const fileTemplates: (PluginTemplateType & { weight: number })[] = filterFiles.map((filename) => {
-    const content = readFileSync(`${basePath}/${filename}`, 'utf-8');
     return {
-      ...JSON.parse(content),
-      id: `${PluginSourceEnum.community}-${filename.replace('.json', '')}`,
-      source: PluginSourceEnum.community
+      bufferId: unAuthBufferId,
+      feConfigs,
+      ...(includeSubPlans && { subPlans })
     };
-  });
+  })();
 
-  fileTemplates.sort((a, b) => b.weight - a.weight);
-
-  global.communityPlugins = fileTemplates;
+  return GetSystemInitDataResponseSchema.parse(response);
 }
+
+export default NextAPI(handler);

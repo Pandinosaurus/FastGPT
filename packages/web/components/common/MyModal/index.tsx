@@ -5,42 +5,60 @@ import {
   ModalContent,
   ModalHeader,
   ModalCloseButton,
-  ModalContentProps,
+  type ModalContentProps,
   Box,
-  Image,
-  useMediaQuery
+  type ImageProps
 } from '@chakra-ui/react';
-import MyIcon from '../Icon';
+import MyBox from '../MyBox';
+import { useSystem } from '../../../hooks/useSystem';
+import Avatar from '../Avatar';
 
-export interface MyModalProps extends ModalContentProps {
+export type MyModalProps = Omit<ModalContentProps, 'title'> & {
   iconSrc?: string;
+  iconColor?: ImageProps['color'];
   title?: any;
   isCentered?: boolean;
-  isOpen: boolean;
+  isLoading?: boolean;
+  isOpen?: boolean;
   onClose?: () => void;
-}
+  closeOnOverlayClick?: boolean;
+  size?: 'md' | 'lg';
+  showCloseButton?: boolean;
+};
 
+/** 保留旧版头部和正文 API，加载遮罩覆盖正文可视外壳，内容在内层滚动。 */
 const MyModal = ({
-  isOpen,
+  isOpen = true,
   onClose,
   iconSrc,
   title,
   children,
   isCentered,
+  isLoading,
   w = 'auto',
   maxW = ['90vw', '600px'],
+  closeOnOverlayClick = true,
+  iconColor,
+  size = 'md',
+  showCloseButton = true,
   ...props
 }: MyModalProps) => {
-  const [isPc] = useMediaQuery('(min-width: 900px)');
+  const { isPc } = useSystem();
 
   return (
     <Modal
       isOpen={isOpen}
       onClose={() => onClose && onClose()}
+      size={size}
       autoFocus={false}
       isCentered={isPc ? isCentered : true}
+      blockScrollOnMount={false}
+      allowPinchZoom
+      scrollBehavior={'inside'}
+      closeOnOverlayClick={closeOnOverlayClick}
+      returnFocusOnClose={false}
     >
-      <ModalOverlay />
+      <ModalOverlay zIndex={props.zIndex} />
       <ModalContent
         w={w}
         minW={['90vw', '400px']}
@@ -48,44 +66,68 @@ const MyModal = ({
         position={'relative'}
         maxH={'85vh'}
         boxShadow={'7'}
+        containerProps={{
+          zIndex: props.zIndex
+        }}
         {...props}
       >
-        {!title && onClose && <ModalCloseButton zIndex={1} />}
+        {!title && onClose && showCloseButton && <ModalCloseButton zIndex={1} />}
         {!!title && (
           <ModalHeader
             display={'flex'}
             alignItems={'center'}
-            fontWeight={500}
             background={'#FBFBFC'}
             borderBottom={'1px solid #F4F6F8'}
             roundedTop={'lg'}
             py={'10px'}
+            fontSize={'md'}
+            fontWeight={'bold'}
+            minH={['46px', '53px']}
           >
             {iconSrc && (
               <>
-                {iconSrc.startsWith('/') ? (
-                  <Image mr={3} objectFit={'contain'} alt="" src={iconSrc} w={'20px'} />
-                ) : (
-                  <MyIcon mr={3} name={iconSrc as any} w={'20px'} />
-                )}
+                <Avatar
+                  color={iconColor}
+                  objectFit={'contain'}
+                  alt=""
+                  src={iconSrc}
+                  w={'20px'}
+                  borderRadius={'sm'}
+                />
               </>
             )}
-            {title}
+            <Box ml={iconSrc ? 3 : 0} color={'myGray.900'} fontWeight={'500'}>
+              {title}
+            </Box>
             <Box flex={1} />
             {onClose && (
-              <ModalCloseButton position={'relative'} fontSize={'sm'} top={0} right={0} />
+              <ModalCloseButton position={'relative'} fontSize={'xs'} top={0} right={0} />
             )}
           </ModalHeader>
         )}
 
-        <Box
-          overflow={props.overflow || 'overlay'}
-          h={'100%'}
+        <MyBox
+          isLoading={isLoading}
+          position={'relative'}
+          overflow={['visible', 'unset'].includes(String(props.overflow)) ? 'visible' : 'hidden'}
+          h={'auto'}
+          flex={'1 1 auto'}
+          minH={0}
+          minW={0}
           display={'flex'}
           flexDirection={'column'}
         >
-          {children}
-        </Box>
+          <Box
+            overflow={props.overflow ?? 'overlay'}
+            h={'auto'}
+            flex={'1 1 auto'}
+            minH={0}
+            display={'flex'}
+            flexDirection={'column'}
+          >
+            {children}
+          </Box>
+        </MyBox>
       </ModalContent>
     </Modal>
   );

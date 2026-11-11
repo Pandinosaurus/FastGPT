@@ -1,8 +1,19 @@
-import { CollectionWithDatasetType, DatasetSchemaType } from '@fastgpt/global/core/dataset/type';
+import { type DatasetSchemaType } from '@fastgpt/global/core/dataset/type';
 import { MongoDatasetCollection } from './collection/schema';
 import { MongoDataset } from './schema';
-import { delCollectionAndRelatedSources } from './collection/controller';
-import { ClientSession } from '../../common/mongo';
+import { delCollectionRelatedSource } from './collection/controller';
+import { deleteCollectionPermissions } from '../../support/permission/collection/controller';
+import { type ClientSession } from '../../common/mongo';
+import { MongoDatasetTraining } from './training/schema';
+import { MongoDatasetData } from './data/schema';
+import { deleteDatasetDataVector } from '../../common/vectorDB/controller';
+import { getFullTextStore } from './data/textStore';
+import { DatasetErrEnum } from '@fastgpt/global/common/error/code/dataset';
+import { retryFn } from '@fastgpt/global/common/system/utils';
+import { UserError } from '@fastgpt/global/common/error/utils';
+import { getS3DatasetSource } from '../../common/s3/sources/dataset';
+import { MongoDatasetSynonym, MongoDatasetSynonymMapping } from './synonym/schema';
+import { invalidateDatasetSynonymMatcherCache } from './synonym/entity';
 
 /* ============= dataset ========== */
 /* find all datasetId by top datasetId */
@@ -34,23 +45,23 @@ export async function findDatasetAndAllChildren({
     return datasets;
   };
   const [dataset, childDatasets] = await Promise.all([
-    MongoDataset.findById(datasetId),
+    MongoDataset.findById(datasetId).lean(),
     find(datasetId)
   ]);
 
   if (!dataset) {
-    return Promise.reject('Dataset not found');
+    return Promise.reject(new UserError('Dataset not found'));
   }
 
   return [dataset, ...childDatasets];
 }
 
 export async function getCollectionWithDataset(collectionId: string) {
-  const data = (await MongoDatasetCollection.findById(collectionId)
-    .populate('datasetId')
-    .lean()) as CollectionWithDatasetType;
+  const data = await MongoDatasetCollection.findById(collectionId)
+    .populate<{ dataset: DatasetSchemaType }>('dataset')
+    .lean();
   if (!data) {
-    return Promise.reject('Collection is not exist');
+    return Promise.reject(DatasetErrEnum.unExistCollection);
   }
   return data;
 }
@@ -60,7 +71,7 @@ export async function delDatasetRelevantData({
   datasets,
   session
 }: {
-  datasets: DatasetSchemaType[];
+  datasets: { _id: string; teamId: string }[];
   session: ClientSession;
 }) {
   if (!datasets.length) return;
@@ -68,10 +79,10 @@ export async function delDatasetRelevantData({
   const teamId = datasets[0].teamId;
 
   if (!teamId) {
-    return Promise.reject('teamId is required');
+    return Promise.reject(new UserError('TeamId is required'));
   }
 
-  const datasetIds = datasets.map((item) => String(item._id));
+  const datasetIds = datasets.map((item) => item._id);
 
   // Get _id, teamId, fileId, metadata.relatedImgId for all collections
   const collections = await MongoDatasetCollection.find(
@@ -79,8 +90,50 @@ export async function delDatasetRelevantData({
       teamId,
       datasetId: { $in: datasetIds }
     },
-    '_id teamId fileId metadata'
+    '_id teamId datasetId fileId metadata'
   ).lean();
 
-  await delCollectionAndRelatedSources({ collections, session });
+  // delete training data
+  await MongoDatasetTraining.deleteMany({
+    teamId,
+    datasetId: { $in: datasetIds }
+  });
+
+  // 同义词配置和映射属于 dataset 数据，即使功能关闭也必须随知识库删除。
+  await MongoDatasetSynonymMapping.deleteMany({
+    teamId,
+    datasetId: { $in: datasetIds }
+  }).session(session);
+  await MongoDatasetSynonym.deleteMany({
+    teamId,
+    datasetId: { $in: datasetIds }
+  }).session(session);
+
+  // Delete dataset_data_texts(store 分发:mongo 真实删除,milvus 空操作——全文随向量删除)
+  await getFullTextStore().deleteByDatasetIds({ teamId, datasetIds }, session);
+  // Delete dataset_datas in batches by datasetId
+  for (const datasetId of datasetIds) {
+    await MongoDatasetData.deleteMany({
+      teamId,
+      datasetId
+    }).maxTimeMS(300000);
+  }
+
+  await delCollectionRelatedSource({ collections });
+  // Delete vector data
+  await deleteDatasetDataVector({ teamId, datasetIds });
+
+  // delete collections and their permission snapshots (same transaction)
+  const collectionIds = collections.map((item) => String(item._id));
+  await MongoDatasetCollection.deleteMany({
+    teamId,
+    datasetId: { $in: datasetIds }
+  }).session(session);
+  await deleteCollectionPermissions({ teamId, collectionIds, session });
+
+  // Delete all dataset files
+  for (const datasetId of datasetIds) {
+    await getS3DatasetSource().deleteDatasetFilesByPrefix({ datasetId });
+    invalidateDatasetSynonymMatcherCache({ teamId, datasetId });
+  }
 }

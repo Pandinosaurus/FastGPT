@@ -1,17 +1,23 @@
 import { setCron } from '@fastgpt/service/common/system/cron';
 import { startTrainingQueue } from '@/service/core/dataset/training/utils';
 import { clearTmpUploadFiles } from '@fastgpt/service/common/file/utils';
-import { checkInvalidDatasetFiles, checkInvalidDatasetData, checkInvalidVector } from './cronTask';
-import { checkTimerLock } from '@fastgpt/service/common/system/timerLock/utils';
+import { checkInvalidDatasetData, checkInvalidVector } from './cronTask';
+import { checkTimerLock, deleteTimerLock } from '@fastgpt/service/common/system/timerLock/utils';
 import { TimerIdEnum } from '@fastgpt/service/common/system/timerLock/constants';
 import { addHours } from 'date-fns';
+import { getScheduleTriggerApp } from '@/service/core/app/utils';
+import { cronJob as sandboxCronJob } from '@fastgpt/service/core/ai/sandbox/application/cron';
+import { clearExpiredS3FilesCron } from '@fastgpt/service/common/s3/lifecycle/cleanup';
+import { checkAndRunModelStatusProbe } from '@fastgpt/service/core/ai/modelStatus/service';
 
+// Try to run train every minute
 const setTrainingQueueCron = () => {
   setCron('*/1 * * * *', () => {
     startTrainingQueue();
   });
 };
 
+// Clear tmp upload files every ten minutes
 const setClearTmpUploadFilesCron = () => {
   // Clear tmp upload files every ten minutes
   setCron('*/10 * * * *', () => {
@@ -20,17 +26,6 @@ const setClearTmpUploadFilesCron = () => {
 };
 
 const clearInvalidDataCron = () => {
-  setCron('0 */1 * * *', async () => {
-    if (
-      await checkTimerLock({
-        timerId: TimerIdEnum.checkInValidDatasetFiles,
-        lockMinuted: 59
-      })
-    ) {
-      checkInvalidDatasetFiles(addHours(new Date(), 2), addHours(new Date(), 6));
-    }
-  });
-
   setCron('10 */1 * * *', async () => {
     if (
       await checkTimerLock({
@@ -38,7 +33,7 @@ const clearInvalidDataCron = () => {
         lockMinuted: 59
       })
     ) {
-      checkInvalidDatasetData(addHours(new Date(), 2), addHours(new Date(), 6));
+      checkInvalidDatasetData(addHours(new Date(), -6), addHours(new Date(), -2));
     }
   });
 
@@ -49,7 +44,41 @@ const clearInvalidDataCron = () => {
         lockMinuted: 59
       })
     ) {
-      checkInvalidVector(addHours(new Date(), 2), addHours(new Date(), 6));
+      checkInvalidVector(addHours(new Date(), -6), addHours(new Date(), -2));
+    }
+  });
+};
+
+// Run app timer trigger every hour
+const scheduleTriggerAppCron = () => {
+  setCron('0 */1 * * *', async () => {
+    if (
+      await checkTimerLock({
+        timerId: TimerIdEnum.scheduleTriggerApp,
+        lockMinuted: 59
+      })
+    ) {
+      getScheduleTriggerApp();
+    }
+  });
+  getScheduleTriggerApp();
+};
+
+/** 每分钟先获取 timer lock，进入后由服务层统一校验开关与探测间隔。 */
+const modelStatusProbeCron = () => {
+  setCron('*/1 * * * *', async () => {
+    if (
+      await checkTimerLock({
+        timerId: TimerIdEnum.modelStatusProbe,
+        // 正常完成后会主动释放；10 分钟只作为进程异常退出时的兜底 TTL。
+        lockMinuted: 10
+      })
+    ) {
+      try {
+        await checkAndRunModelStatusProbe();
+      } finally {
+        await deleteTimerLock({ timerId: TimerIdEnum.modelStatusProbe });
+      }
     }
   });
 };
@@ -58,4 +87,8 @@ export const startCron = () => {
   setTrainingQueueCron();
   setClearTmpUploadFilesCron();
   clearInvalidDataCron();
+  scheduleTriggerAppCron();
+  clearExpiredS3FilesCron();
+  sandboxCronJob();
+  modelStatusProbeCron();
 };

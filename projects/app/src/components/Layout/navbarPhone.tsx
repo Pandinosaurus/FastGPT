@@ -1,51 +1,85 @@
 import React, { useMemo } from 'react';
 import { useRouter } from 'next/router';
 import { Flex, Box } from '@chakra-ui/react';
-import { useChatStore } from '@/web/core/chat/storeChat';
+import { useChatStore } from '@/web/core/chat/context/useChatStore';
 import { useTranslation } from 'next-i18next';
 import Badge from '../Badge';
 import MyIcon from '@fastgpt/web/components/common/Icon';
+import { useUserStore } from '@/web/support/user/useUserStore';
 
 const NavbarPhone = ({ unread }: { unread: number }) => {
   const router = useRouter();
+  const { userInfo } = useUserStore();
   const { t } = useTranslation();
-  const { lastChatAppId, lastChatId } = useChatStore();
+  const { lastChatAppId, lastPane } = useChatStore();
+
   const navbarList = useMemo(
     () => [
       {
-        label: t('navbar.Chat'),
+        label: t('common:navbar.Chat'),
         icon: 'core/chat/chatLight',
         activeIcon: 'core/chat/chatFill',
-        link: `/chat?appId=${lastChatAppId}&chatId=${lastChatId}`,
+        link: `/chat?appId=${lastChatAppId}&pane=${lastPane}`,
         activeLink: ['/chat'],
         unread: 0
       },
       {
-        label: t('navbar.Apps'),
+        label: t('common:navbar.Studio'),
         icon: 'core/app/aiLight',
         activeIcon: 'core/app/aiFill',
-        link: `/app/list`,
-        activeLink: ['/app/list', '/app/detail'],
+        link: `/dashboard/agent`,
+        activeLink: [
+          '/dashboard/agent',
+          '/app/detail',
+          '/dashboard/tool',
+          '/dashboard/tool/marketplace',
+          '/dashboard/systemTool',
+          '/dashboard/templateMarket',
+          '/dashboard/mcpServer',
+          '/dashboard/evaluation',
+          '/dashboard/evaluation/create'
+        ],
         unread: 0
       },
       {
-        label: t('navbar.Tools'),
-        icon: 'phoneTabbar/tool',
-        activeIcon: 'phoneTabbar/toolFill',
-        link: '/tools',
-        activeLink: ['/tools'],
+        label: t('common:navbar.Datasets'),
+        icon: 'core/dataset/datasetLight',
+        activeIcon: 'core/dataset/datasetFill',
+        link: `/dataset/list`,
+        activeLink: ['/dataset/list', '/dataset/detail'],
         unread: 0
       },
       {
-        label: t('navbar.Account'),
+        label: t('common:navbar.Account'),
         icon: 'support/user/userLight',
         activeIcon: 'support/user/userFill',
-        link: '/account',
-        activeLink: ['/account'],
+        link: '/account/info',
+        activeLink: [
+          '/account/bill',
+          '/account/info',
+          '/account/team',
+          '/account/usage',
+          '/account/apikey',
+          '/account/setting',
+          '/account/inform',
+          '/account/model'
+        ],
         unread
-      }
+      },
+      ...(userInfo?.username === 'root'
+        ? [
+            {
+              label: t('common:navbar.Config'),
+              icon: 'support/config/configLight',
+              activeIcon: 'support/config/configFill',
+              link: '/admin/dashboard',
+              activePrefix: ['/admin'],
+              activeLink: [] as string[]
+            }
+          ]
+        : [])
     ],
-    [t, lastChatAppId, lastChatId, unread]
+    [lastChatAppId, lastPane, t, unread, userInfo?.username]
   );
 
   return (
@@ -56,44 +90,52 @@ const NavbarPhone = ({ unread }: { unread: number }) => {
         justifyContent={'space-between'}
         backgroundColor={'white'}
         position={'relative'}
-        px={10}
+        px={4}
       >
-        {navbarList.map((item) => (
-          <Flex
-            position={'relative'}
-            key={item.link}
-            cursor={'pointer'}
-            borderRadius={'md'}
-            textAlign={'center'}
-            alignItems={'center'}
-            h={'100%'}
-            pt={1}
-            px={3}
-            transform={'scale(0.9)'}
-            {...(item.activeLink.includes(router.pathname)
-              ? {
-                  color: 'primary.600'
+        {navbarList.map((item) => {
+          const isActive =
+            (item.activePrefix?.some((prefix) => router.pathname.startsWith(prefix)) ?? false) ||
+            item.activeLink.includes(router.pathname);
+
+          return (
+            <Flex
+              position={'relative'}
+              key={item.link}
+              cursor={'pointer'}
+              borderRadius={'md'}
+              textAlign={'center'}
+              alignItems={'center'}
+              h={'100%'}
+              pt={1}
+              px={3}
+              transform={'scale(0.9)'}
+              {...(isActive
+                ? {
+                    color: 'primary.600'
+                  }
+                : {
+                    color: 'myGray.500'
+                  })}
+              onClick={() => {
+                if (item.link === router.asPath) return;
+                if (item.link.startsWith('/chat')) {
+                  window.open(item.link, '_blank');
+                  return;
                 }
-              : {
-                  color: 'myGray.500'
-                })}
-            onClick={() => {
-              if (item.link === router.asPath) return;
-              router.push(item.link);
-            }}
-          >
-            <Badge isDot count={item.unread}>
-              <MyIcon
-                name={
-                  (item.activeLink.includes(router.pathname) ? item.activeIcon : item.icon) as any
-                }
-                width={'20px'}
-                height={'20px'}
-              />
-              <Box fontSize={'12px'}>{item.label}</Box>
-            </Badge>
-          </Flex>
-        ))}
+                router.push(item.link);
+              }}
+            >
+              <Badge isDot count={item.unread}>
+                <MyIcon
+                  name={(isActive ? item.activeIcon : item.icon) as any}
+                  width={'20px'}
+                  height={'20px'}
+                />
+                <Box fontSize={'12px'}>{item.label}</Box>
+              </Badge>
+            </Flex>
+          );
+        })}
       </Flex>
     </>
   );
